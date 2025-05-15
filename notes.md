@@ -1,0 +1,3 @@
+- tick spacing = 10 (i.e, +/-.1%)
+- Stable Pool: x³y + y³x ≥ k
+- 0.05% fee
