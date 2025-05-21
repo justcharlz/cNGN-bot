@@ -4,33 +4,67 @@ from dotenv import load_dotenv
 load_dotenv() # Loads variables from a .env file if present
 
 # --- Blockchain Configuration ---
+
 RPC_URL = "https://base-mainnet.infura.io/v3/35fbbf13c9134267aa47e7acd9242abf"
 CHAIN_ID = 8453
+
 # --- Wallet Configuration ---
-DUMMY_PRIVATE_KEY = os.getenv("PRIVATE_KEY", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") # 64 hex characters
+
+DUMMY_PRIVATE_KEY = os.getenv("PRIVATE_KEY", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 # --- Pool Configuration ---
+
 POOL_ADDRESS = "0x0206B696a410277eF692024C2B64CcF4EaC78589"
 NONFUNGIBLE_POSITION_MANAGER_ADDRESS = "0x827922686190790b37229fd06084350E74485b72"
+
 # --- Token Configuration ---
+
 TOKEN0_ADDRESS = "0x46C85152bFe9f96829aA94755D9f915F9B10EF5F" # cNGN
 TOKEN1_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+
 # --- Bot Configuration ---
+
 POLL_INTERVAL_SECONDS = 60  # How often to check the price and rebalance
-GAS_LIMIT_MULTIPLIER = 1.2 # Multiplier for estimated gas limit
+EIP1559_MIN_PRIORITY_FEE_GWEI = 1.5  # Minimum tip in Gwei (e.g., 1.5 Gwei)
+EIP1559_MAX_FEE_BASE_MULTIPLIER = 2.0 # Multiplier for baseFee to calculate maxFee (e.g., 2.0 means maxFee can be up to 2*baseFee + tip)
+
 # --- Minimal ABIs ---
+
 MINIMAL_ERC20_ABI = """
 [
     {"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},
     {"constant":false,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"type":"function"},
     {"constant":false,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"type":"function"},
     {"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"},
-    {"constant":true,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"type":"function"}
+    {"constant":true,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"type":"function"},
+        {
+        "constant": true,
+        "inputs": [
+            {
+                "name": "_owner",
+                "type": "address"
+            },
+            {
+                "name": "_spender",
+                "type": "address"
+            }
+        ],
+        "name": "allowance",
+        "outputs": [
+            {
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "payable": false,
+        "stateMutability": "view",
+        "type": "function"
+    }
 ]
 """
 
 MINIMAL_POOL_ABI = """
 [
-    {"inputs":[],"name":"slot0","outputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"internalType":"int24","name":"tick","type":"int24"},{"internalType":"uint16","name":"observationIndex","type":"uint16"},{"internalType":"uint16","name":"observationCardinality","type":"uint16"},{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"},{"internalType":"uint8","name":"feeProtocol","type":"uint8"},{"internalType":"bool","name":"unlocked","type":"bool"}],"stateMutability":"view","type":"function"},
+    {"inputs":[],"name":"slot0","outputs":[{"internalType":"uint160","name":"sqrtPriceX96","type":"uint160"},{"internalType":"int24","name":"tick","type":"int24"},{"internalType":"uint16","name":"observationIndex","type":"uint16"},{"internalType":"uint16","name":"observationCardinality","type":"uint16"},{"internalType":"uint16","name":"observationCardinalityNext","type":"uint16"},{"internalType":"bool","name":"unlocked","type":"bool"}],"stateMutability":"view","type":"function"},
     {"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},
     {"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},
     {"inputs":[],"name":"tickSpacing","outputs":[{"internalType":"int24","name":"","type":"int24"}],"stateMutability":"view","type":"function"},
