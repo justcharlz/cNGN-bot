@@ -1,3 +1,5 @@
 - tick spacing = 10 (i.e, +/-.1%)
 - Stable Pool: x³y + y³x ≥ k
 - 0.05% fee
+- https://blog.chain.link/introducing-chainlink-runtime-environment/
+    - ^ integrate Chainlink feed into on-chain rebalancing bots?
