@@ -25,6 +25,9 @@ ANVIL_RPC_URL = "http://127.0.0.1:8545"
 TOKEN0_WHALE_ADDRESS = "0xF7Fceda4d895602de62E54E4289ECFA97B86EBea" # cNGN Whale
 TOKEN1_WHALE_ADDRESS = "0x122fDD9fEcbc82F7d4237C0549a5057E31c8EF8D" # USDC Whale
 
+MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342
+MIN_SQRT_RATIO = 4295128739
+
 ETH_TO_FUND_ACCOUNTS = Web3.to_wei(10, 'ether')
 ETH_FOR_WHALE_OPERATIONS = Web3.to_wei(0.5, 'ether')
 INITIAL_TOKEN_UNITS_FUNDING = Decimal("70000") # Slightly increased for more test swaps
@@ -113,22 +116,18 @@ class TestStrategyAnvil(unittest.TestCase):
                 amount=(2**256 - 1)
             )
             
-            # Assuming config.MINIMAL_POOL_ABI now includes 'swap' function as per user's comment
             cls.swappable_pool_contract_for_tests = cls.w3.eth.contract(address=config.POOL_ADDRESS, abi=config.MINIMAL_POOL_ABI)
             if 'swap' not in cls.swappable_pool_contract_for_tests.functions:
                  logger.warning(f"The ABI for pool {config.POOL_ADDRESS} (from config.MINIMAL_POOL_ABI) does not seem to include the 'swap' function. Swap tests might fail.")
 
 
-            # Initialize Strategy: Pass price_provider_start_block
-            current_block_for_test_setup = cls.w3.eth.block_number
-            # For tests, set start_block to a recent point relative to fork for efficiency
-            test_price_provider_start_block = max(1, current_block_for_test_setup - cls.TEST_PRICE_PROVIDER_START_BLOCK_OFFSET) 
-            logger.info(f"PriceProvider will fetch initial history from block: {test_price_provider_start_block}")
+            default_start_block_for_testing = 28028682
+            logger.info(f"PriceProvider will fetch initial history from block: {default_start_block_for_testing}")
 
             pool_tick_spacing = cls.pool_for_testing.functions.tickSpacing().call()
             cls.strategy_under_test = Strategy(
                 sd_min_width_ticks=pool_tick_spacing * 20, # e.g., +/- 10 tick spacings from center
-                price_provider_start_block=test_price_provider_start_block
+                price_provider_start_block=default_start_block_for_testing #
             )
             logger.info("Strategy instance created; PriceProvider initial price fetch complete.")
 
@@ -140,7 +139,6 @@ class TestStrategyAnvil(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # ... (same as previous version)
         global original_rpc_url_for_strategy_testing
         logger.info("### Tearing down Anvil Test Environment for Strategy Suite ###")
         if original_rpc_url_for_strategy_testing is not None:
@@ -148,11 +146,6 @@ class TestStrategyAnvil(unittest.TestCase):
             logger.info(f"Original RPC URL ({config.RPC_URL}) restored.")
         else:
             logger.warning("Original RPC URL was not captured; cannot restore.")
-
-    # --- Helper methods (_anvil_rpc, _fund_account_eth, _fund_account_erc20, _approve_erc20_for_spender, _execute_pool_swap) ---
-    # ... (These remain largely the same as in the provided test_strategy_anvil.py, ensuring they use cls.w3 etc.) ...
-    # Minor pk fix in _approve_erc20_for_spender and _execute_pool_swap for swapper if needed.
-    # Corrected swapper_account_details.pk to be hex string in setUpClass.
 
     @classmethod
     def _anvil_rpc(cls, method, params=[]):
@@ -212,9 +205,7 @@ class TestStrategyAnvil(unittest.TestCase):
 
     def _execute_pool_swap(self, token_in_addr_cs, amount_in_raw, execute_as_zero_for_one):
         logger.info(f"Swapper executing swap: Amount {amount_in_raw} of token_in {token_in_addr_cs} (zeroForOne={execute_as_zero_for_one})")
-        MIN_SQRT_RATIO = 4295128739 
-        MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342
-        sqrt_price_limit = MIN_SQRT_RATIO + 1 if execute_as_zero_for_one else MAX_SQRT_RATIO - 1
+        sqrt_price_limit = (MIN_SQRT_RATIO + 1) if execute_as_zero_for_one else (MAX_SQRT_RATIO - 1)
         tx_params = {
             'from': self.swapper_account_details['address'],
             'nonce': self.w3.eth.get_transaction_count(self.swapper_account_details['address']),
@@ -224,25 +215,8 @@ class TestStrategyAnvil(unittest.TestCase):
         tx_params['maxPriorityFeePerGas'] = self.w3.to_wei(1.5, 'gwei')
         tx_params['maxFeePerGas'] = base_fee * 2 + tx_params['maxPriorityFeePerGas']
         
-        # For exact input, amountSpecified should be positive.
-        # The provided code has `amount_in_raw if execute_as_zero_for_one else -amount_in_raw`
-        # This is for when amountSpecified can be negative to mean "exact output".
-        # For "exact input", amountSpecified is always positive.
-        # Let's assume we always specify exact input for simplicity in tests.
-        amount_to_specify = amount_in_raw
-
-        swap_function_call = self.swappable_pool_contract_for_tests.functions.swap(
-            self.swapper_account_details['address'], 
-            execute_as_zero_for_one,
-            amount_to_specify, # Amount of token_in
-            sqrt_price_limit,
-            b'' 
-        )
-        try:
-            tx_params['gas'] = int(swap_function_call.estimate_gas(tx_params) * 1.5)
-        except Exception as e_gas:
-            logger.error(f"Gas estimation for swap failed: {e_gas}. Using default high gas.")
-            tx_params['gas'] = 1_000_000 
+        # No need to estimate swap gas in production since we're only minting and burning
+        tx_params['gas'] = 1_000_000 
         signed_tx = self.w3.eth.account.sign_transaction(tx_params, self.swapper_account_details['pk']) # pk must be bytes
         tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
@@ -347,7 +321,6 @@ class TestStrategyAnvil(unittest.TestCase):
 
 
     def test_05_first_position_creation(self):
-        # ... (This test remains structurally similar to the one in the prompt)
         logger.info("### Test 05: Strategy First Position Creation ###")
         s = self.strategy_under_test
         s._get_existing_position() 
@@ -364,7 +337,6 @@ class TestStrategyAnvil(unittest.TestCase):
 
 
     def test_06_no_rebalance_when_price_in_range(self):
-        # ... (This test remains structurally similar)
         logger.info("### Test 06: No Rebalance When Price is Within Range ###")
         s = self.strategy_under_test
         s._get_existing_position() 
@@ -395,7 +367,7 @@ class TestStrategyAnvil(unittest.TestCase):
 
         # Try to move price significantly lower
         amount_to_swap_t0 = int(Decimal("20000") * (10**self.pool_token0_decimals)) # Increased swap amount
-        max_swap_attempts = 3
+        max_swap_attempts = 10
         price_moved_out = False
         current_tick_after_swap = s._get_current_tick_and_price_state()[0] # Get current tick before loop
         for i in range(max_swap_attempts):
@@ -425,7 +397,6 @@ class TestStrategyAnvil(unittest.TestCase):
         logger.info(f"Verified old position ID {initial_pos_id} is no longer valid (burned).")
 
     def test_08_position_removal(self):
-        # ... (This test remains structurally similar)
         logger.info("### Test 08: Strategy Position Removal ###")
         s = self.strategy_under_test
         s._get_existing_position()
@@ -485,7 +456,7 @@ class TestStrategyAnvil(unittest.TestCase):
 
 if __name__ == "__main__":
     print("Starting Anvil Test Suite for strategy.py (Full Price History SD)...")
-    # ... (rest of __main__ from previous version) ...
+
     print("----------------------------------------------------------------------")
     print("IMPORTANT: Ensure Anvil is running in a separate terminal with a")
     print(f"   Base mainnet fork: anvil --fork-url <YOUR_BASE_MAINNET_RPC_URL>")

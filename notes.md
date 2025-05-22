@@ -11,5 +11,23 @@
 
 
 TODO:
-- Fix swap gas estimation
-- Fix PriceProvider methods which get all historical prices
+======================================================================
+FAIL: test_02b_price_provider_fetch_new_prices_with_swaps (test_strategy_anvil.TestStrategyAnvil.test_02b_price_provider_fetch_new_prices_with_swaps)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 282, in test_02b_price_provider_fetch_new_prices_with_swaps
+    self.assertGreater(len(pp.all_prices_chronological), initial_history_len,
+AssertionError: 119 not greater than 119 : Full price history did not grow after executing a swap and fetching new prices.
+
+======================================================================
+FAIL: test_07_rebalance_after_price_moves_out (test_strategy_anvil.TestStrategyAnvil.test_07_rebalance_after_price_moves_out)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 381, in test_07_rebalance_after_price_moves_out
+    self.assertTrue(price_moved_out, f"Failed to move price out of initial range {initial_pos_range} after {max_swap_attempts} swaps. Final tick: {current_tick_after_swap}")
+AssertionError: False is not true : Failed to move price out of initial range (-74030, -73690) after 10 swaps. Final tick: -73858
+
+----------------------------------------------------------------------
+Ran 10 tests in 406.048s
+
+FAILED (failures=2)

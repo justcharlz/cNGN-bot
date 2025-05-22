@@ -21,18 +21,24 @@ CNGN_REFERENCE_ADDRESS = "0x46C85152bFe9f96829aA94755D9f915F9B10EF5F".lower() #
 
 class PriceProvider:
     """
-    Handles fetching and maintaining a complete history of pool prices 
+    Handles fetching and maintaining a complete history of pool prices
     from a specified start block.
     """
+    # Constants for fetching logs with retries
+    MAX_FETCH_RETRIES = 5
+    INITIAL_BACKOFF_SECONDS = 3  # Start with a 3-second backoff for rate limits
+    BACKOFF_FACTOR = 2           # Factor by which backoff time increases
+    DEFAULT_POST_REQUEST_DELAY_SECONDS = 0.25 # Small delay after each successful/final RPC call
+
     def __init__(self, w3, pool_contract, cngn_reference_address, swap_event_topic0, initial_start_block):
         self.logger = logging.getLogger(__name__ + ".PriceProvider")
         self.w3 = w3
         self.pool_contract = pool_contract
         # Stores all prices with metadata: list of {'price': float, 'block': int, 'logIndex': int}
-        self.all_prices_chronological = [] 
+        self.all_prices_chronological = []
         self.cngn_reference_address = cngn_reference_address.lower()
         self.swap_event_topic0 = swap_event_topic0
-        
+
         self.start_block = initial_start_block
         self.last_processed_block = None # Will be set after initial fetch
         self._determine_price_inversion()
@@ -56,38 +62,100 @@ class PriceProvider:
             event_data = self.pool_contract.events.Swap().process_log(log_entry) #
             sqrt_price_x96 = Decimal(event_data['args']['sqrtPriceX96']) #
             price = (sqrt_price_x96 / Q96_DEC) ** 2 #
-            
+
             if self.invert_price: #
                 if price != Decimal(0):
                     price = Decimal(1) / price
                 else:
                     self.logger.warning("Price is zero before inversion, cannot invert. Skipping log.")
-                    return None 
+                    return None
             return float(price)
         except Exception as e:
             self.logger.warning(f"Error processing log entry to price: {e}. Log: {log_entry}")
             return None
 
     def _fetch_logs_in_batches(self, from_block, to_block, batch_size=10000): # for BATCH_SIZE
-        """Helper to fetch logs in manageable batches for a given range."""
+        """
+        Helper to fetch logs in manageable batches, with retries for rate limits
+        and other transient errors.
+        If a batch fails after all retries, this function will raise an exception.
+        """
         all_logs = []
         self.logger.info(f"Batch fetching Swap logs from block {from_block} to {to_block} (batch size: {batch_size})")
-        for current_batch_start in range(from_block, to_block + 1, batch_size):
-            current_batch_end = min(current_batch_start + batch_size - 1, to_block)
-            self.logger.debug(f"Fetching log batch: {current_batch_start} -> {current_batch_end}")
-            try:
-                logs_batch = self.w3.eth.get_logs({ #
-                    "address": self.pool_contract.address,
-                    "fromBlock": current_batch_start,
-                    "toBlock": current_batch_end,
-                    "topics": [self.swap_event_topic0] #
-                })
-                all_logs.extend(logs_batch)
-            except Exception as e:
-                self.logger.error(f"Error fetching log batch {current_batch_start}-{current_batch_end}: {e}", exc_info=True)
-                # Depending on strategy, might stop or continue with partial data for the range.
-                # For full history, it's better to halt or have a retry mechanism. For now, break.
-                break 
+
+        current_batch_start_block = from_block
+        while current_batch_start_block <= to_block:
+            current_batch_end_block = min(current_batch_start_block + batch_size - 1, to_block)
+            self.logger.debug(f"Preparing to fetch log batch: {current_batch_start_block} -> {current_batch_end_block}")
+
+            attempt = 0
+            current_backoff_seconds = self.INITIAL_BACKOFF_SECONDS
+
+            while attempt < self.MAX_FETCH_RETRIES:
+                try:
+                    self.logger.debug(f"Attempt {attempt + 1}/{self.MAX_FETCH_RETRIES} for batch {current_batch_start_block}-{current_batch_end_block}")
+                    logs_this_batch = self.w3.eth.get_logs({ #
+                        "address": self.pool_contract.address,
+                        "fromBlock": current_batch_start_block,
+                        "toBlock": current_batch_end_block,
+                        "topics": [self.swap_event_topic0] #
+                    })
+                    all_logs.extend(logs_this_batch)
+                    self.logger.debug(f"Successfully fetched {len(logs_this_batch)} logs for batch {current_batch_start_block}-{current_batch_end_block}.")
+
+                    # Introduce a small delay after any RPC call to be polite
+                    time.sleep(self.DEFAULT_POST_REQUEST_DELAY_SECONDS)
+                    break  # Successful fetch for this batch, move to next batch
+
+                except ValueError as ve: # Web3.py often wraps HTTP errors in ValueError
+                    error_message = str(ve).lower() # For easier string searching
+                    # Check for specific Infura/Alchemy rate limit codes or general messages
+                    is_rate_limit_error = (
+                        "429" in error_message or
+                        "too many requests" in error_message or
+                        "-32005" in error_message or # Infura specific rate limit from error
+                        "rate limit" in error_message or
+                        "exceeded CUs" in error_message # Alchemy compute units
+                    )
+
+                    if is_rate_limit_error:
+                        if attempt < self.MAX_FETCH_RETRIES - 1:
+                            self.logger.warning(
+                                f"Rate limit encountered on attempt {attempt + 1} for batch {current_batch_start_block}-{current_batch_end_block}. "
+                                f"Waiting {current_backoff_seconds}s. Error: {ve}"
+                            )
+                            time.sleep(current_backoff_seconds)
+                            current_backoff_seconds *= self.BACKOFF_FACTOR
+                            attempt += 1
+                        else:
+                            self.logger.error(
+                                f"Max retries ({self.MAX_FETCH_RETRIES}) reached for rate-limited batch {current_batch_start_block}-{current_batch_end_block}. Error: {ve}"
+                            )
+                            # Re-raise the last error if max retries are exhausted for rate limits
+                            raise ConnectionError(f"Failed to fetch logs for batch {current_batch_start_block}-{current_batch_end_block} after {self.MAX_FETCH_RETRIES} rate-limited attempts: {ve}") from ve
+                    else:
+                        # Not a rate limit error, or a non-retryable ValueError
+                        self.logger.error(f"Non-rate-limit ValueError on attempt {attempt + 1} for batch {current_batch_start_block}-{current_batch_end_block}: {ve}", exc_info=True)
+                        raise # Re-raise immediately for other ValueErrors
+
+                except Exception as e: # Catch other potential network issues (e.g. requests.exceptions.ConnectionError, Timeout)
+                    self.logger.warning(
+                        f"General network/RPC error on attempt {attempt + 1} for batch {current_batch_start_block}-{current_batch_end_block}. "
+                        f"Waiting {current_backoff_seconds}s. Error: {e}"
+                    )
+                    if attempt < self.MAX_FETCH_RETRIES - 1:
+                        time.sleep(current_backoff_seconds)
+                        current_backoff_seconds *= self.BACKOFF_FACTOR
+                        attempt += 1
+                    else:
+                        self.logger.error(
+                            f"Max retries ({self.MAX_FETCH_RETRIES}) reached for batch {current_batch_start_block}-{current_batch_end_block} due to general errors. Last error: {e}"
+                        )
+                        raise ConnectionError(f"Failed to fetch logs for batch {current_batch_start_block}-{current_batch_end_block} after {self.MAX_FETCH_RETRIES} general error attempts: {e}") from e
+
+            current_batch_start_block = current_batch_end_block + 1
+
+        self.logger.info(f"Finished batch fetching. Total logs collected: {len(all_logs)} from {from_block} to {to_block}.")
         return all_logs
 
     def fetch_initial_prices(self):
@@ -96,57 +164,58 @@ class PriceProvider:
         Populates self.all_prices_chronological and updates self.last_processed_block.
         """
         self.logger.info(f"Fetching ALL historical prices from start_block: {self.start_block}.")
-        self.all_prices_chronological = [] 
-        
+        self.all_prices_chronological = []
+
         latest_block_on_chain = self.w3.eth.block_number
-        
+
         if self.start_block > latest_block_on_chain:
             self.logger.warning(f"Start block {self.start_block} is ahead of current chain head {latest_block_on_chain}. No initial prices to fetch.")
-            self.last_processed_block = latest_block_on_chain 
+            self.last_processed_block = latest_block_on_chain
             return
 
+        # _fetch_logs_in_batches will raise ConnectionError if it fails after retries
         logs = self._fetch_logs_in_batches(self.start_block, latest_block_on_chain)
-        
+
         temp_processed_prices = []
         for log_entry in logs:
             price = self._process_log_entry_to_price(log_entry)
             if price is not None:
                 temp_processed_prices.append({
-                    'price': price, 
-                    'block': log_entry['blockNumber'], 
+                    'price': price,
+                    'block': log_entry['blockNumber'],
                     'logIndex': log_entry['logIndex']
                 })
-        
+
         temp_processed_prices.sort(key=lambda x: (x['block'], x['logIndex'])) #
         self.all_prices_chronological = temp_processed_prices
-        
+
         if self.all_prices_chronological:
-            # The last processed block is the block of the newest entry in our complete history,
-            # or latest_block_on_chain if history is still empty (meaning no relevant logs found).
             self.last_processed_block = max(self.all_prices_chronological[-1]['block'], latest_block_on_chain if not logs else 0)
         else:
             self.last_processed_block = latest_block_on_chain
-        
+
         self.logger.info(f"Initialized full price history with {len(self.all_prices_chronological)} prices. Last processed block for initial scan: {self.last_processed_block}")
 
     def fetch_new_prices(self):
         """Fetches new swap prices since `self.last_processed_block` and appends to history."""
         if self.last_processed_block is None:
             self.logger.warning("last_processed_block is None. Triggering initial full price fetch.")
-            self.fetch_initial_prices() 
+            # This call will propagate exceptions from _fetch_logs_in_batches if it fails
+            self.fetch_initial_prices()
             return
 
         current_block_on_chain = self.w3.eth.block_number
         from_block_for_new = self.last_processed_block + 1
-        
+
         if from_block_for_new > current_block_on_chain:
             self.logger.debug(f"No new blocks to process. Last processed: {self.last_processed_block}, Current on chain: {current_block_on_chain}")
             return
 
         self.logger.info(f"Fetching new prices from block {from_block_for_new} to {current_block_on_chain}")
-        
+
+        # _fetch_logs_in_batches will raise ConnectionError if it fails after retries
         logs = self._fetch_logs_in_batches(from_block_for_new, current_block_on_chain)
-            
+
         newly_added_prices_metadata = []
         for log_entry in logs:
             price = self._process_log_entry_to_price(log_entry)
@@ -156,16 +225,13 @@ class PriceProvider:
                     'block': log_entry['blockNumber'],
                     'logIndex': log_entry['logIndex']
                 })
-        
+
         if newly_added_prices_metadata:
-            # New logs are from a chronological fetch, so they should be in order already.
-            # If _fetch_logs_in_batches has complex internal ordering, explicit sort here might be needed.
-            # Assuming batches are appended chronologically, and logs within batches are chronological.
             newly_added_prices_metadata.sort(key=lambda x: (x['block'], x['logIndex'])) # Ensure strict order
-            
+
             self.all_prices_chronological.extend(newly_added_prices_metadata)
             self.logger.info(f"Added {len(newly_added_prices_metadata)} new prices. Total price history size: {len(self.all_prices_chronological)}.")
-        
+
         self.last_processed_block = current_block_on_chain
 
     def get_all_prices_for_sd(self):
@@ -209,14 +275,15 @@ class Strategy:
         # Determine start_block for PriceProvider
         default_start_block = 28028682
         resolved_start_block = price_provider_start_block if price_provider_start_block is not None else default_start_block
-        
-        self.price_provider = PriceProvider(self.w3, 
-                                            self.pool_contract, 
-                                            CNGN_REFERENCE_ADDRESS, 
+
+        self.price_provider = PriceProvider(self.w3,
+                                            self.pool_contract,
+                                            CNGN_REFERENCE_ADDRESS,
                                             self.swap_event_topic0,
                                             initial_start_block=resolved_start_block)
-        
+
         self.logger.info(f"Performing initial full price history fetch via PriceProvider from block {resolved_start_block}...")
+        # fetch_initial_prices can now raise ConnectionError if retries fail
         self.price_provider.fetch_initial_prices()
         if not self.price_provider.all_prices_chronological:
             self.logger.warning("Initial full price history from PriceProvider is empty. SD calculation might be unavailable initially.")
@@ -232,18 +299,18 @@ class Strategy:
 
     def _calculate_price_sd(self):
         """Calculates standard deviation from PriceProvider's full historical data."""
-        min_points_for_sd = 3 
+        min_points_for_sd = 3
         current_price_values = self.price_provider.get_all_prices_for_sd()
-        
+
         if len(current_price_values) < min_points_for_sd:
             self.logger.warning(f"Not enough price data points ({len(current_price_values)}) from PriceProvider to calculate SD over all history. Need at least {min_points_for_sd}.")
             return None
-        
+
         prices_series = pd.Series(current_price_values, dtype=float)
-        sd = prices_series.std(ddof=1) 
-        if pd.isna(sd): 
+        sd = prices_series.std(ddof=1)
+        if pd.isna(sd):
             self.logger.warning(f"Standard deviation over all history resulted in NaN (history size: {len(current_price_values)}). This can happen if all values are the same or too few unique values.")
-            return None 
+            return None
         self.logger.info(f"Calculated SD over all ({len(prices_series)}) prices: {sd:.8f} via PriceProvider.")
         return sd
 
@@ -270,7 +337,7 @@ class Strategy:
         if self.price_provider.invert_price:
             if p_current_raw == Decimal(0):
                 self.logger.error("Current raw price (token0/token1) is 0, cannot invert for SD-oriented price.")
-                return current_tick, current_sqrt_price_x96, None 
+                return current_tick, current_sqrt_price_x96, None
             p_current_for_sd_orientation = Decimal(1) / p_current_raw
         else:
             p_current_for_sd_orientation = p_current_raw
@@ -280,18 +347,18 @@ class Strategy:
 
     def _calculate_target_ticks(self, current_tick, p_current_for_sd_orientation):
         """Calculates target ticks based on current price and its standard deviation."""
-        # ... (implementation remains largely the same, ensures fetch_new_prices is called)
         if p_current_for_sd_orientation is None:
             self.logger.error("p_current_for_sd_orientation is None, cannot calculate SD-based ticks. Using fallback.")
             return self._fallback_ticks(current_tick)
 
-        self.price_provider.fetch_new_prices() 
+        # fetch_new_prices can now raise ConnectionError if retries fail
+        self.price_provider.fetch_new_prices()
         price_sd_float = self._calculate_price_sd()
 
         if price_sd_float is None or price_sd_float <= 0:
             self.logger.warning(f"Invalid price_sd ({price_sd_float}). Falling back to fixed min_width_ticks ({self.sd_min_width_ticks}).")
             return self._fallback_ticks(current_tick)
-        
+
         price_sd_decimal = Decimal(str(price_sd_float))
         target_price_low_oriented = p_current_for_sd_orientation - price_sd_decimal
         target_price_high_oriented = p_current_for_sd_orientation + price_sd_decimal
@@ -300,7 +367,7 @@ class Strategy:
         if target_price_low_oriented <= Decimal(0):
             self.logger.warning(f"Calculated target_price_low_oriented ({target_price_low_oriented}) is <= 0. Adjusting to p_current_for_sd_orientation / 2.")
             target_price_low_oriented = p_current_for_sd_orientation / Decimal(2)
-            if target_price_low_oriented <= Decimal(0): 
+            if target_price_low_oriented <= Decimal(0):
                 target_price_low_oriented = Decimal("1e-18")
 
         if self.price_provider.invert_price:
@@ -328,11 +395,11 @@ class Strategy:
 
         tick_lower_aligned = math.floor(tick_lower_raw / self.tick_spacing) * self.tick_spacing
         tick_upper_aligned = math.ceil(tick_upper_raw / self.tick_spacing) * self.tick_spacing
-        
+
         if tick_lower_aligned >= tick_upper_aligned:
             self.logger.warning(f"Aligned ticks overlap or inverted (Lower={tick_lower_aligned}, Upper={tick_upper_aligned}). Adjusting using fallback around current tick.")
             return self._fallback_ticks(current_tick)
-        
+
         if (tick_upper_aligned - tick_lower_aligned) < self.sd_min_width_ticks:
             self.logger.info(f"SD-based tick range ({tick_upper_aligned - tick_lower_aligned}) is narrower than min_width_ticks ({self.sd_min_width_ticks}). Expanding range.")
             tick_center_of_narrow_range = (tick_lower_aligned + tick_upper_aligned) / 2.0
@@ -356,7 +423,7 @@ class Strategy:
         raw_upper = aligned_current_mid_tick + half_min_width
         tick_lower = math.floor(raw_lower / self.tick_spacing) * self.tick_spacing
         tick_upper = math.ceil(raw_upper / self.tick_spacing) * self.tick_spacing
-        if tick_lower >= tick_upper: 
+        if tick_lower >= tick_upper:
             self.logger.warning(f"Fallback ticks still invalid (L:{tick_lower} U:{tick_upper}). Ensuring min separation.")
             tick_upper = tick_lower + self.tick_spacing
         self.logger.info(f"Fallback target ticks: Lower={int(tick_lower)}, Upper={int(tick_upper)}")
@@ -365,7 +432,7 @@ class Strategy:
     def _get_existing_position(self):
         """Refreshes self.current_position_token_id and self.current_position_details."""
         token_ids = dex_utils.get_owner_token_ids(self.nft_manager_contract, self.wallet_address)
-        self.current_position_token_id = None 
+        self.current_position_token_id = None
         self.current_position_details = None
         if not token_ids:
             self.logger.info("No existing NFT positions found for this wallet.")
@@ -382,7 +449,7 @@ class Strategy:
                     self.logger.info(f"Found existing position for this pool: TokenID={token_id}, Liquidity={details['liquidity']}")
                     self.current_position_token_id = token_id
                     self.current_position_details = details
-                    return token_id 
+                    return token_id
             else:
                 self.logger.warning(f"Could not get details for TokenID {token_id}. Skipping.")
         self.logger.info("No existing NFT positions found specifically for the configured pool.")
@@ -400,10 +467,10 @@ class Strategy:
         amount0_min = 0
         amount1_min = 0
         mint_call_params = (
-            self.token0_address, self.token1_address, self.tick_spacing, 
+            self.token0_address, self.token1_address, self.tick_spacing,
             tick_lower, tick_upper, balance0, balance1,
             amount0_min, amount1_min, self.wallet_address,
-            int(time.time()) + 600, 0 
+            int(time.time()) + 600, 0
         )
         self.logger.info(f"Calling dex_utils.mint_new_position with params: {mint_call_params}")
         receipt = dex_utils.mint_new_position(
@@ -412,8 +479,8 @@ class Strategy:
         )
         if receipt and receipt.status == 1:
             self.logger.info(f"Successfully minted new position. TxHash: {receipt.transactionHash.hex()}")
-            time.sleep(3) 
-            self._get_existing_position() 
+            time.sleep(3)
+            self._get_existing_position()
             return self.current_position_token_id
         else:
             self.logger.error(f"Failed to mint new position. Receipt: {receipt}")
@@ -434,19 +501,19 @@ class Strategy:
             self.logger.info(f"Decreasing liquidity for position {token_id} by {liquidity_to_remove}")
             decrease_success = dex_utils.decrease_liquidity_and_collect_position(
                 self.w3, self.nft_manager_contract, token_id,
-                liquidity_to_remove, 0, 0, self.wallet_address,       
+                liquidity_to_remove, 0, 0, self.wallet_address,
                 self.account, self.wallet_address
             )
             if not decrease_success:
                 self.logger.error(f"Failed to decrease liquidity and collect for position {token_id}.")
                 return False
             self.logger.info(f"Successfully decreased liquidity and collected for position {token_id}.")
-            time.sleep(2) 
+            time.sleep(2)
             updated_details = dex_utils.get_position_details(self.nft_manager_contract, token_id)
             if updated_details and updated_details['liquidity'] != 0:
                 self.logger.error(f"Liquidity for position {token_id} is still {updated_details['liquidity']} after decrease. Cannot burn safely.")
                 return False
-            elif not updated_details and liquidity_to_remove > 0 : 
+            elif not updated_details and liquidity_to_remove > 0 :
                  self.logger.warning(f"Could not re-verify details for position {token_id} after decrease.")
         self.logger.info(f"Burning NFT for position {token_id}")
         burn_success = dex_utils.burn_nft_position(
@@ -469,16 +536,24 @@ class Strategy:
         current_tick, _, p_current_for_sd = self._get_current_tick_and_price_state()
         if current_tick is None or p_current_for_sd is None:
             self.logger.error("Cannot proceed with rebalance check: failed to get current tick/price state.")
-            self.price_provider.fetch_new_prices() # Attempt to update price history
+            # Attempt to update price history even if current state fetch failed,
+            # as it might be a transient issue for get_current_pool_state but logs might still be fetchable.
+            try:
+                self.price_provider.fetch_new_prices()
+            except ConnectionError as ce: # Catch specific error from log fetching
+                 self.logger.error(f"Failed to update price history during rebalance check due to connection error: {ce}")
+            except Exception as e_fetch: # Catch any other error during fetch
+                 self.logger.error(f"Generic error updating price history during rebalance check: {e_fetch}")
             return
 
-        self._get_existing_position() 
+        self._get_existing_position()
 
         if not self.current_position_token_id:
             self.logger.info("No existing managed position found. Creating a new one.")
+            # _calculate_target_ticks itself calls fetch_new_prices, which can raise ConnectionError
             target_tick_lower, target_tick_upper = self._calculate_target_ticks(current_tick, p_current_for_sd)
             self._create_new_position(target_tick_lower, target_tick_upper)
-        else: 
+        else:
             pos_details = self.current_position_details
             pos_tick_lower = pos_details['tickLower']
             pos_tick_upper = pos_details['tickUpper']
@@ -490,20 +565,23 @@ class Strategy:
                 remove_success = self._remove_position(self.current_position_token_id)
                 if not remove_success:
                     self.logger.error("Failed to remove old position during rebalance. Aborting rebalance cycle.")
-                    self.price_provider.fetch_new_prices()
-                    return 
+                    # Attempt to fetch new prices even if removal failed, to keep history up-to-date for next cycle
+                    self.price_provider.fetch_new_prices() # This can raise ConnectionError
+                    return
                 self.logger.info("Old position successfully removed.")
                 self.logger.info("Step 2: Creating new position at new target ticks...")
                 current_tick_after_removal, _, p_current_for_sd_after_removal = self._get_current_tick_and_price_state()
                 if current_tick_after_removal is None or p_current_for_sd_after_removal is None:
                      self.logger.error("Failed to get current price after removal. Cannot create new position.")
-                     self.price_provider.fetch_new_prices()
+                     self.price_provider.fetch_new_prices() # This can raise ConnectionError
                      return
+                # _calculate_target_ticks itself calls fetch_new_prices
                 target_tick_lower, target_tick_upper = self._calculate_target_ticks(current_tick_after_removal, p_current_for_sd_after_removal)
                 self._create_new_position(target_tick_lower, target_tick_upper)
-            else: 
+            else:
                 self.logger.info(f"No rebalance needed. Current tick {current_tick} is within position range [{pos_tick_lower}, {pos_tick_upper}].")
-                self.price_provider.fetch_new_prices()
+                # Still fetch new prices to keep history updated
+                self.price_provider.fetch_new_prices() # This can raise ConnectionError
 
 
     def run(self):
@@ -511,14 +589,21 @@ class Strategy:
         self.logger.info(f"🚀 Starting Strategy Bot. Poll interval: {config.POLL_INTERVAL_SECONDS} seconds.")
         self.logger.info("Strategy: Initial position check and price history fetch were done during __init__.")
         self.logger.info(f"Strategy: Initial full price history size from PriceProvider: {len(self.price_provider.all_prices_chronological)}.")
-        
+
         while True:
             try:
                 self._check_and_rebalance()
+            except ConnectionError as ce: # Specifically catch ConnectionErrors from log fetching
+                self.logger.error(f"A connection error occurred in the main strategy loop (likely during log fetching): {ce}", exc_info=True)
+                # Price history update might have failed leading to this, so no explicit fetch here.
+                # The error is logged, and the loop will sleep and retry.
             except Exception as e:
-                self.logger.error(f"An error occurred in the main strategy loop: {e}", exc_info=True)
+                self.logger.error(f"An unexpected error occurred in the main strategy loop: {e}", exc_info=True)
+                # Try to update price history if a generic error occurred, in case it's recoverable for next cycle
                 try:
                     self.price_provider.fetch_new_prices()
+                except ConnectionError as fetch_ce:
+                    self.logger.error(f"Failed to update price history after main loop ConnectionError: {fetch_ce}")
                 except Exception as fetch_e:
                     self.logger.error(f"Failed to update price history after main loop error: {fetch_e}")
             self.logger.info(f"Next check in {config.POLL_INTERVAL_SECONDS} seconds... 😴")
@@ -530,13 +615,13 @@ if __name__ == '__main__':
     try:
         # Default start block from data.py if not overridden by config or constructor arg
         start_block_for_strategy = getattr(config, 'PRICE_PROVIDER_START_BLOCK', 28028682) # for default value
-        
+
         strategy_bot = Strategy(
             sd_min_width_ticks=200, # Example: 20 * 10 (tick_spacing)
-            price_provider_start_block=start_block_for_strategy 
-        ) 
+            price_provider_start_block=start_block_for_strategy
+        )
         strategy_bot.run()
-    except ConnectionError as ce:
+    except ConnectionError as ce: # Catch ConnectionError during Strategy init (e.g. initial price fetch)
         logger.critical(f"Failed to initialize strategy due to connection error: {ce}")
     except ValueError as ve:
         logger.critical(f"Failed to initialize strategy due to value error: {ve}")
