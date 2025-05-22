@@ -70,7 +70,7 @@ else:
 
 # ─── Precompute Swap event topic ────────────────────────────────────────────────
 sig = "Swap(address,address,int256,int256,uint160,uint128,int24)"
-topic0 = "0x" + w3.keccak(text=sig).hex()
+topic0 = w3.keccak(text=sig).hex()
 
 # ─── Fetch + decode logs, queueing rate-limited ranges ─────────────────────────
 latest_block = w3.eth.block_number

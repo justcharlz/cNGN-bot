@@ -68,7 +68,23 @@ MINIMAL_POOL_ABI = """
     {"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},
     {"inputs":[],"name":"token1","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},
     {"inputs":[],"name":"tickSpacing","outputs":[{"internalType":"int24","name":"","type":"int24"}],"stateMutability":"view","type":"function"},
-    {"inputs":[],"name":"fee","outputs":[{"internalType":"uint24","name":"","type":"uint24"}],"stateMutability":"view","type":"function"}
+    {"inputs":[],"name":"fee","outputs":[{"internalType":"uint24","name":"","type":"uint24"}],"stateMutability":"view","type":"function"},
+            {
+            "inputs": [
+                {"internalType": "address", "name": "recipient", "type": "address"},
+                {"internalType": "bool", "name": "zeroForOne", "type": "bool"},
+                {"internalType": "int256", "name": "amountSpecified", "type": "int256"},
+                {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"},
+                {"internalType": "bytes", "name": "data", "type": "bytes"}
+            ],
+            "name": "swap",
+            "outputs": [
+                {"internalType": "int256", "name": "amount0", "type": "int256"},
+                {"internalType": "int256", "name": "amount1", "type": "int256"}
+            ],
+            "stateMutability": "nonpayable",
+            "type": "function"
+        }
 ]
 """
 
