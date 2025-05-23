@@ -15,19 +15,23 @@ TODO:
 FAIL: test_02b_price_provider_fetch_new_prices_with_swaps (test_strategy_anvil.TestStrategyAnvil.test_02b_price_provider_fetch_new_prices_with_swaps)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 282, in test_02b_price_provider_fetch_new_prices_with_swaps
-    self.assertGreater(len(pp.all_prices_chronological), initial_history_len,
-AssertionError: 119 not greater than 119 : Full price history did not grow after executing a swap and fetching new prices.
+  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 302, in test_02b_price_provider_fetch_new_prices_with_swaps
+    self._execute_pool_swap(self.pool_token0_addr, amount_to_swap, execute_as_zero_for_one=True)
+  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 246, in _execute_pool_swap
+    self.assertEqual(receipt.status, 1, f"Swap transaction failed. Hash: {tx_hash.hex()}")
+AssertionError: 0 != 1 : Swap transaction failed. Hash: 0xc2af20f9da462db28e23728accb2bda0daaede9d55bacc1bf7d0a1acb2563f83
 
 ======================================================================
 FAIL: test_07_rebalance_after_price_moves_out (test_strategy_anvil.TestStrategyAnvil.test_07_rebalance_after_price_moves_out)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 381, in test_07_rebalance_after_price_moves_out
-    self.assertTrue(price_moved_out, f"Failed to move price out of initial range {initial_pos_range} after {max_swap_attempts} swaps. Final tick: {current_tick_after_swap}")
-AssertionError: False is not true : Failed to move price out of initial range (-74030, -73690) after 10 swaps. Final tick: -73858
+  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 398, in test_07_rebalance_after_price_moves_out
+    self._execute_pool_swap(self.pool_token0_addr, amount_to_swap_t0, execute_as_zero_for_one=True)
+  File "/Users/johnbeecher/Desktop/cNGN/bot/test_strategy_anvil.py", line 246, in _execute_pool_swap
+    self.assertEqual(receipt.status, 1, f"Swap transaction failed. Hash: {tx_hash.hex()}")
+AssertionError: 0 != 1 : Swap transaction failed. Hash: 0x343ac36e9752abffb5cecdcd47c1ea23e782095b1689a56a11afc34388e52921
 
 ----------------------------------------------------------------------
-Ran 10 tests in 406.048s
+Ran 10 tests in 333.559s
 
 FAILED (failures=2)

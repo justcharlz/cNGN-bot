@@ -206,23 +206,47 @@ class TestStrategyAnvil(unittest.TestCase):
     def _execute_pool_swap(self, token_in_addr_cs, amount_in_raw, execute_as_zero_for_one):
         logger.info(f"Swapper executing swap: Amount {amount_in_raw} of token_in {token_in_addr_cs} (zeroForOne={execute_as_zero_for_one})")
         sqrt_price_limit = (MIN_SQRT_RATIO + 1) if execute_as_zero_for_one else (MAX_SQRT_RATIO - 1)
-        tx_params = {
+        
+        recipient_address = self.swapper_account_details['address']
+
+        # Base transaction parameters (excluding 'to' and 'gas')
+        # 'to' will be inferred from the contract object
+        # 'gas' will be estimated or set to a fallback
+        base_tx_params = {
             'from': self.swapper_account_details['address'],
             'nonce': self.w3.eth.get_transaction_count(self.swapper_account_details['address']),
-            'chainId': self.w3.eth.chain_id }
+            'chainId': self.w3.eth.chain_id,
+        }
         latest_block = self.w3.eth.get_block('latest')
         base_fee = latest_block.get('baseFeePerGas', self.w3.to_wei(1, 'gwei'))
-        tx_params['maxPriorityFeePerGas'] = self.w3.to_wei(1.5, 'gwei')
-        tx_params['maxFeePerGas'] = base_fee * 2 + tx_params['maxPriorityFeePerGas']
+        base_tx_params['maxPriorityFeePerGas'] = self.w3.to_wei(1.5, 'gwei')
+        base_tx_params['maxFeePerGas'] = base_fee * 2 + base_tx_params['maxPriorityFeePerGas']
+
+        # Construct the swap function call object
+        swap_function_call = self.swappable_pool_contract_for_tests.functions.swap(
+            recipient_address,       # address recipient
+            execute_as_zero_for_one, # bool zeroForOne
+            int(amount_in_raw),      # int256 amountSpecified (must be int)
+            sqrt_price_limit,        # uint160 sqrtPriceLimitX96
+            b''                      # bytes data (empty for standard swaps)
+        )
+
+        final_tx_params = base_tx_params.copy()
+
+        final_tx_params['gas'] = 1_000_000 # No need to estimate gas for swaps since we only mint and burn in prod
+
+        # Build the transaction using final_tx_params (which now includes 'gas' but not 'to')
+        # The 'to' address (self.swappable_pool_contract_for_tests.address) will be added by build_transaction.
+        transaction_to_sign = swap_function_call.build_transaction(final_tx_params)
         
-        # No need to estimate swap gas in production since we're only minting and burning
-        tx_params['gas'] = 1_000_000 
-        signed_tx = self.w3.eth.account.sign_transaction(tx_params, self.swapper_account_details['pk']) # pk must be bytes
+        signed_tx = self.w3.eth.account.sign_transaction(transaction_to_sign, self.swapper_account_details['pk'])
         tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+        
         self.assertEqual(receipt.status, 1, f"Swap transaction failed. Hash: {tx_hash.hex()}")
         logger.info(f"Swap executed successfully. Hash: {tx_hash.hex()}")
-        self._anvil_rpc("anvil_mine", [1,1]) 
+        
+        self._anvil_rpc("anvil_mine", [1,1])
         time.sleep(1)
 
     # --- Test Cases Start Here ---
@@ -276,7 +300,6 @@ class TestStrategyAnvil(unittest.TestCase):
         # Execute a swap to generate new log(s)
         amount_to_swap = int(Decimal("100") * (10**self.pool_token0_decimals)) # Swap 100 of Token0
         self._execute_pool_swap(self.pool_token0_addr, amount_to_swap, execute_as_zero_for_one=True)
-        
         pp.fetch_new_prices()
         
         self.assertGreater(len(pp.all_prices_chronological), initial_history_len,
