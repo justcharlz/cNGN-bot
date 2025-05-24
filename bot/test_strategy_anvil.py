@@ -75,7 +75,7 @@ class TestStrategyAnvil(unittest.TestCase):
 
             # Swapper Account Setup
             swapper_acc_obj = cls.w3.eth.account.create() 
-            cls.swapper_account_details = {"account": swapper_acc_obj, "address": swapper_acc_obj.address, "pk": swapper_acc_obj.key.hex()} # Ensure pk is hex string
+            cls.swapper_account_details = {"account": swapper_acc_obj, "address": swapper_acc_obj.address, "pk": swapper_acc_obj.key.hex()}
             logger.info(f"Swapper Account: {cls.swapper_account_details['address']}")
             cls._fund_account_eth(cls.swapper_account_details['address'], ETH_TO_FUND_ACCOUNTS)
 
@@ -188,19 +188,44 @@ class TestStrategyAnvil(unittest.TestCase):
     @classmethod
     def _approve_erc20_for_spender(cls, owner_acc_details, token_contract, spender_address, amount):
         logger.debug(f"Approving {spender_address} for {amount} of {token_contract.address} by {owner_acc_details['address']}")
-        nonce = cls.w3.eth.get_transaction_count(owner_acc_details['address'])
-        tx_params = {
-            'from': owner_acc_details['address'], 'nonce': nonce, 'chainId': cls.w3.eth.chain_id }
+        
+        # Base transaction parameters
+        base_tx_params = {
+            'from': owner_acc_details['address'],
+            'nonce': cls.w3.eth.get_transaction_count(owner_acc_details['address']),
+            'chainId': cls.w3.eth.chain_id
+        }
         latest_block = cls.w3.eth.get_block('latest')
         base_fee = latest_block.get('baseFeePerGas', cls.w3.to_wei(1, 'gwei'))
-        tx_params['maxPriorityFeePerGas'] = cls.w3.to_wei(1.5, 'gwei')
-        tx_params['maxFeePerGas'] = base_fee * 2 + tx_params['maxPriorityFeePerGas']
+        base_tx_params['maxPriorityFeePerGas'] = cls.w3.to_wei(1.5, 'gwei')
+        base_tx_params['maxFeePerGas'] = base_fee * 2 + base_tx_params['maxPriorityFeePerGas']
+
         approve_fn = token_contract.functions.approve(spender_address, amount)
-        tx_params['gas'] = int(approve_fn.estimate_gas(tx_params) * 1.2)
-        signed_tx = cls.w3.eth.account.sign_transaction(tx_params, owner_acc_details['pk']) # pk must be bytes
+        
+        final_tx_params = base_tx_params.copy()
+        try:
+            # Estimate gas. 'from' is needed if the contract function uses msg.sender.
+            # estimate_gas on a function object doesn't need 'to' in its params.
+            estimated_gas = approve_fn.estimate_gas({'from': owner_acc_details['address']})
+            final_tx_params['gas'] = int(estimated_gas * 1.2) # Add 20% buffer
+        except Exception as e:
+            logger.error(f"Gas estimation for approval failed: {e}. Using fallback: 100,000")
+            final_tx_params['gas'] = 100000 # Fallback gas for approval
+
+        # Build the transaction; 'to' will be correctly set by build_transaction.
+        transaction_to_sign = approve_fn.build_transaction(final_tx_params)
+
+        # Convert private key from hex string to bytes
+        pk_hex = owner_acc_details['pk']
+
+        signed_tx = cls.w3.eth.account.sign_transaction(transaction_to_sign, pk_hex)
         tx_hash = cls.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         receipt = cls.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        assert receipt.status == 1, f"Approval failed for token {token_contract.address}"
+        
+        assert receipt.status == 1, (
+            f"Approval failed for token {token_contract.address} to spender {spender_address}. "
+            f"TxHash: {tx_hash.hex()}. Receipt: {receipt}"
+        )
         logger.debug(f"Approval successful for {token_contract.address} to spender {spender_address}")
 
     def _execute_pool_swap(self, token_in_addr_cs, amount_in_raw, execute_as_zero_for_one):
@@ -209,9 +234,6 @@ class TestStrategyAnvil(unittest.TestCase):
         
         recipient_address = self.swapper_account_details['address']
 
-        # Base transaction parameters (excluding 'to' and 'gas')
-        # 'to' will be inferred from the contract object
-        # 'gas' will be estimated or set to a fallback
         base_tx_params = {
             'from': self.swapper_account_details['address'],
             'nonce': self.w3.eth.get_transaction_count(self.swapper_account_details['address']),
@@ -222,29 +244,44 @@ class TestStrategyAnvil(unittest.TestCase):
         base_tx_params['maxPriorityFeePerGas'] = self.w3.to_wei(1.5, 'gwei')
         base_tx_params['maxFeePerGas'] = base_fee * 2 + base_tx_params['maxPriorityFeePerGas']
 
-        # Construct the swap function call object
         swap_function_call = self.swappable_pool_contract_for_tests.functions.swap(
-            recipient_address,       # address recipient
-            execute_as_zero_for_one, # bool zeroForOne
-            int(amount_in_raw),      # int256 amountSpecified (must be int)
-            sqrt_price_limit,        # uint160 sqrtPriceLimitX96
-            b''                      # bytes data (empty for standard swaps)
+            recipient_address,
+            execute_as_zero_for_one,
+            int(amount_in_raw),
+            sqrt_price_limit,
+            b''
         )
 
         final_tx_params = base_tx_params.copy()
+        final_tx_params['gas'] = 1_000_000 
 
-        final_tx_params['gas'] = 1_000_000 # No need to estimate gas for swaps since we only mint and burn in prod
-
-        # Build the transaction using final_tx_params (which now includes 'gas' but not 'to')
-        # The 'to' address (self.swappable_pool_contract_for_tests.address) will be added by build_transaction.
         transaction_to_sign = swap_function_call.build_transaction(final_tx_params)
         
-        signed_tx = self.w3.eth.account.sign_transaction(transaction_to_sign, self.swapper_account_details['pk'])
-        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+        pk_hex = self.swapper_account_details['pk']
+
+        signed_tx = self.w3.eth.account.sign_transaction(transaction_to_sign, pk_hex)
+        tx_hash_hex = "" # Initialize to ensure it's available for logging even if send_raw_transaction fails
+        try:
+            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            tx_hash_hex = tx_hash.hex()
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+        except Exception as e_tx:
+            logger.error(f"Error sending transaction or waiting for receipt (Hash if available: {tx_hash_hex}): {e_tx}", exc_info=True)
+            raise
+
+        if receipt.status == 0:
+            logger.error(f"Swap transaction {tx_hash_hex} FAILED. Receipt: {receipt}")
+            try:
+                # Attempt to get debug trace from Anvil. The options dict can be empty.
+                trace_options = {} # You can add options like {'disableStorage': True, 'disableMemory': True, 'disableStack': True} to make trace smaller
+                trace = self.w3.provider.make_request("debug_traceTransaction", [tx_hash_hex, trace_options])
+                import json # For pretty printing
+                logger.error(f"Anvil debug_traceTransaction for {tx_hash_hex}:\n{json.dumps(trace, indent=2)}")
+            except Exception as e_trace:
+                logger.error(f"Failed to get debug_traceTransaction for {tx_hash_hex}: {e_trace}")
         
-        self.assertEqual(receipt.status, 1, f"Swap transaction failed. Hash: {tx_hash.hex()}")
-        logger.info(f"Swap executed successfully. Hash: {tx_hash.hex()}")
+        self.assertEqual(receipt.status, 1, f"Swap transaction failed. Hash: {tx_hash_hex}. Receipt: {receipt}")
+        logger.info(f"Swap executed successfully. Hash: {tx_hash_hex}")
         
         self._anvil_rpc("anvil_mine", [1,1])
         time.sleep(1)
@@ -297,9 +334,31 @@ class TestStrategyAnvil(unittest.TestCase):
         pp = self.strategy_under_test.price_provider
         initial_history_len = len(pp.all_prices_chronological)
 
+        # Determine input token and amount
+        # For zeroForOne=True, token_in is token0
+        token_to_swap_contract = self.pool_token0_contract
+        token_to_swap_addr = self.pool_token0_addr
+        amount_to_swap = int(Decimal("1") * (10**self.pool_token0_decimals))
+
+        # Check balance
+        swapper_balance = token_to_swap_contract.functions.balanceOf(
+            self.swapper_account_details['address']
+        ).call()
+        logger.info(f"PRE-SWAP CHECK: Swapper balance of {token_to_swap_addr}: {swapper_balance}. Need: {amount_to_swap}")
+        self.assertGreaterEqual(swapper_balance, amount_to_swap, "PRE-SWAP FAIL: Insufficient swapper balance.")
+
+        # Check allowance
+        pool_allowance = token_to_swap_contract.functions.allowance(
+            self.swapper_account_details['address'], # owner
+            self.swappable_pool_contract_for_tests.address  # spender (the pool)
+        ).call()
+        logger.info(f"PRE-SWAP CHECK: Pool allowance for swapper's {token_to_swap_addr}: {pool_allowance}. Need: {amount_to_swap}")
+        self.assertGreaterEqual(pool_allowance, amount_to_swap, "PRE-SWAP FAIL: Insufficient pool allowance.")
+
+
         # Execute a swap to generate new log(s)
-        amount_to_swap = int(Decimal("100") * (10**self.pool_token0_decimals)) # Swap 100 of Token0
-        self._execute_pool_swap(self.pool_token0_addr, amount_to_swap, execute_as_zero_for_one=True)
+        self._execute_pool_swap(token_to_swap_addr, amount_to_swap, execute_as_zero_for_one=True)
+        
         pp.fetch_new_prices()
         
         self.assertGreater(len(pp.all_prices_chronological), initial_history_len,
