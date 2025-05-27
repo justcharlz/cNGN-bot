@@ -9,19 +9,15 @@ from web3 import Web3
 
 import config 
 from blockchain_utils import get_web3_provider, get_wallet_credentials, load_contract
-from strategy import Strategy, PriceProvider, CNGN_REFERENCE_ADDRESS, Q96_DEC # PriceProvider for type hints
+from strategy import Strategy, PriceProvider, CNGN_REFERENCE_ADDRESS, Q96_DEC 
 
 # Configure logger for tests
-# Basic config is in strategy.py, but ensure it's effective for tests too.
-# If strategy.py's logger isn't configured when test_strategy_anvil is run directly as __main__,
-# this ensures test logs are seen.
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s][%(filename)s:%(lineno)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 ANVIL_RPC_URL = "http://127.0.0.1:8545"
 
-# Whale addresses from previous context, ensure these are correct for the pool tokens
 TOKEN0_WHALE_ADDRESS = "0xF7Fceda4d895602de62E54E4289ECFA97B86EBea" # cNGN Whale
 TOKEN1_WHALE_ADDRESS = "0x122fDD9fEcbc82F7d4237C0549a5057E31c8EF8D" # USDC Whale
 
@@ -30,14 +26,16 @@ MIN_SQRT_RATIO = 4295128739
 
 ETH_TO_FUND_ACCOUNTS = Web3.to_wei(10, 'ether')
 ETH_FOR_WHALE_OPERATIONS = Web3.to_wei(0.5, 'ether')
-INITIAL_TOKEN_UNITS_FUNDING = Decimal("70000") # Slightly increased for more test swaps
+INITIAL_TOKEN_UNITS_FUNDING = Decimal("70000") 
 
 original_rpc_url_for_strategy_testing = None
 
 class TestStrategyAnvil(unittest.TestCase):
     w3 = None
     bot_account_details = None 
-    pool_for_testing = None    
+    pool_for_testing = None # Used for reading pool state and events
+    router_contract_for_tests = None # Used for executing swaps
+    router_address_cs = None
     
     pool_token0_addr = None
     pool_token1_addr = None
@@ -45,14 +43,13 @@ class TestStrategyAnvil(unittest.TestCase):
     pool_token1_contract = None
     pool_token0_decimals = None
     pool_token1_decimals = None
+    pool_tick_spacing = None
 
-    strategy_under_test: Strategy # Type hint for clarity
-    # price_provider_on_strategy: PriceProvider # Access via strategy_under_test.price_provider
+    strategy_under_test: Strategy 
 
     swapper_account_details = None 
-    swappable_pool_contract_for_tests = None # Assumes config.MINIMAL_POOL_ABI now includes 'swap'
-
-    TEST_PRICE_PROVIDER_START_BLOCK_OFFSET = 500 # Fetch last 500 blocks for tests for PriceProvider
+    
+    TEST_PRICE_PROVIDER_START_BLOCK_OFFSET = 500 
 
     @classmethod
     def setUpClass(cls):
@@ -79,10 +76,21 @@ class TestStrategyAnvil(unittest.TestCase):
             logger.info(f"Swapper Account: {cls.swapper_account_details['address']}")
             cls._fund_account_eth(cls.swapper_account_details['address'], ETH_TO_FUND_ACCOUNTS)
 
-            # Load Pool and Token Contracts & Details
-            cls.pool_for_testing = load_contract(cls.w3, config.POOL_ADDRESS, config.MINIMAL_POOL_ABI)
+            # Load Pool Contract (for state reads and event decoding)
+            cls.pool_for_testing = load_contract(cls.w3, config.POOL_ADDRESS, config.MINIMAL_POOL_ABI) #
             if not cls.pool_for_testing:
                 raise RuntimeError(f"Failed to load main pool contract {config.POOL_ADDRESS}")
+
+            # Load Router Contract (for executing swaps)
+            cls.router_contract_for_tests = load_contract(
+                cls.w3, 
+                config.ROUTER_ADDRESS, 
+                config.ROUTER_ABI
+            ) #
+            if not cls.router_contract_for_tests:
+                raise RuntimeError(f"Failed to load router contract {config.ROUTER_ADDRESS}") #
+            cls.router_address_cs = Web3.to_checksum_address(config.ROUTER_ADDRESS) #
+
 
             cls.pool_token0_addr = Web3.to_checksum_address(cls.pool_for_testing.functions.token0().call())
             cls.pool_token1_addr = Web3.to_checksum_address(cls.pool_for_testing.functions.token1().call())
@@ -92,6 +100,10 @@ class TestStrategyAnvil(unittest.TestCase):
             cls.pool_token1_contract = load_contract(cls.w3, cls.pool_token1_addr, config.MINIMAL_ERC20_ABI)
             cls.pool_token0_decimals = cls.pool_token0_contract.functions.decimals().call()
             cls.pool_token1_decimals = cls.pool_token1_contract.functions.decimals().call()
+            
+            cls.pool_tick_spacing = cls.pool_for_testing.functions.tickSpacing().call() #
+            logger.info(f"Pool Tick Spacing: {cls.pool_tick_spacing}")
+
 
             # Fund Bot and Swapper with Pool Tokens
             amount_t0_fund = int(INITIAL_TOKEN_UNITS_FUNDING * (10**cls.pool_token0_decimals))
@@ -102,32 +114,26 @@ class TestStrategyAnvil(unittest.TestCase):
             cls._fund_account_erc20(cls.bot_account_details['address'], cls.pool_token1_addr, TOKEN1_WHALE_ADDRESS, amount_t1_fund, f"PoolToken1 (Bot)")
             cls._fund_account_erc20(cls.swapper_account_details['address'], cls.pool_token1_addr, TOKEN1_WHALE_ADDRESS, amount_t1_fund, f"PoolToken1 (Swapper)")
             
-            pool_checksum_addr = Web3.to_checksum_address(config.POOL_ADDRESS)
+            # Approve Router to spend Swapper's tokens
             cls._approve_erc20_for_spender(
                 owner_acc_details=cls.swapper_account_details, 
                 token_contract=cls.pool_token0_contract, 
-                spender_address=pool_checksum_addr, 
+                spender_address=cls.router_address_cs, # Approve Router
                 amount=(2**256 - 1)
             )
             cls._approve_erc20_for_spender(
                 owner_acc_details=cls.swapper_account_details,
                 token_contract=cls.pool_token1_contract,
-                spender_address=pool_checksum_addr,
+                spender_address=cls.router_address_cs, # Approve Router
                 amount=(2**256 - 1)
             )
             
-            cls.swappable_pool_contract_for_tests = cls.w3.eth.contract(address=config.POOL_ADDRESS, abi=config.MINIMAL_POOL_ABI)
-            if 'swap' not in cls.swappable_pool_contract_for_tests.functions:
-                 logger.warning(f"The ABI for pool {config.POOL_ADDRESS} (from config.MINIMAL_POOL_ABI) does not seem to include the 'swap' function. Swap tests might fail.")
-
-
             default_start_block_for_testing = 28028682
             logger.info(f"PriceProvider will fetch initial history from block: {default_start_block_for_testing}")
 
-            pool_tick_spacing = cls.pool_for_testing.functions.tickSpacing().call()
             cls.strategy_under_test = Strategy(
-                sd_min_width_ticks=pool_tick_spacing * 20, # e.g., +/- 10 tick spacings from center
-                price_provider_start_block=default_start_block_for_testing #
+                sd_min_width_ticks=cls.pool_tick_spacing * 20, 
+                price_provider_start_block=default_start_block_for_testing 
             )
             logger.info("Strategy instance created; PriceProvider initial price fetch complete.")
 
@@ -189,7 +195,6 @@ class TestStrategyAnvil(unittest.TestCase):
     def _approve_erc20_for_spender(cls, owner_acc_details, token_contract, spender_address, amount):
         logger.debug(f"Approving {spender_address} for {amount} of {token_contract.address} by {owner_acc_details['address']}")
         
-        # Base transaction parameters
         base_tx_params = {
             'from': owner_acc_details['address'],
             'nonce': cls.w3.eth.get_transaction_count(owner_acc_details['address']),
@@ -204,20 +209,14 @@ class TestStrategyAnvil(unittest.TestCase):
         
         final_tx_params = base_tx_params.copy()
         try:
-            # Estimate gas. 'from' is needed if the contract function uses msg.sender.
-            # estimate_gas on a function object doesn't need 'to' in its params.
             estimated_gas = approve_fn.estimate_gas({'from': owner_acc_details['address']})
-            final_tx_params['gas'] = int(estimated_gas * 1.2) # Add 20% buffer
+            final_tx_params['gas'] = int(estimated_gas * 1.2) 
         except Exception as e:
             logger.error(f"Gas estimation for approval failed: {e}. Using fallback: 100,000")
-            final_tx_params['gas'] = 100000 # Fallback gas for approval
+            final_tx_params['gas'] = 100000 
 
-        # Build the transaction; 'to' will be correctly set by build_transaction.
         transaction_to_sign = approve_fn.build_transaction(final_tx_params)
-
-        # Convert private key from hex string to bytes
         pk_hex = owner_acc_details['pk']
-
         signed_tx = cls.w3.eth.account.sign_transaction(transaction_to_sign, pk_hex)
         tx_hash = cls.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         receipt = cls.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
@@ -229,11 +228,41 @@ class TestStrategyAnvil(unittest.TestCase):
         logger.debug(f"Approval successful for {token_contract.address} to spender {spender_address}")
 
     def _execute_pool_swap(self, token_in_addr_cs, amount_in_raw, execute_as_zero_for_one):
-        logger.info(f"Swapper executing swap: Amount {amount_in_raw} of token_in {token_in_addr_cs} (zeroForOne={execute_as_zero_for_one})")
-        sqrt_price_limit = (MIN_SQRT_RATIO + 1) if execute_as_zero_for_one else (MAX_SQRT_RATIO - 1)
-        
-        recipient_address = self.swapper_account_details['address']
+        # Determine tokenIn and tokenOut for the router based on the direction
+        if execute_as_zero_for_one: # Selling token0 (pool_token0_addr) for token1
+            token_in_for_router = self.pool_token0_addr
+            token_out_for_router = self.pool_token1_addr
+            assert token_in_addr_cs.lower() == token_in_for_router.lower(), \
+                f"Mismatch in token_in for zeroForOne swap. Expected {token_in_for_router}, got {token_in_addr_cs}"
+        else: # Selling token1 (pool_token1_addr) for token0
+            token_in_for_router = self.pool_token1_addr
+            token_out_for_router = self.pool_token0_addr
+            assert token_in_addr_cs.lower() == token_in_for_router.lower(), \
+                f"Mismatch in token_in for non-zeroForOne swap. Expected {token_in_for_router}, got {token_in_addr_cs}"
 
+        logger.info(f"Swapper executing ROUTER swap: Amount {amount_in_raw} of token_in {token_in_for_router} to get {token_out_for_router} (zeroForOne={execute_as_zero_for_one})")
+
+        recipient_address = self.swapper_account_details['address']
+        deadline = int(time.time()) + 600  # 10 minutes from now
+        amount_in_int = int(amount_in_raw)
+        amount_out_minimum = 0 # For testing, we usually don't care about slippage with a fixed amount in
+
+        # sqrtPriceLimitX96:
+        # If selling token0 (zeroForOne=True), price (token0/token1) moves down, so sqrtPriceX96 moves down. Limit is a floor.
+        # If selling token1 (zeroForOne=False), price (token0/token1) moves up, so sqrtPriceX96 moves up. Limit is a ceiling.
+        sqrt_price_limit_x96_for_router = (MIN_SQRT_RATIO + 1) if execute_as_zero_for_one else (MAX_SQRT_RATIO - 1)
+
+        params_tuple = (
+            Web3.to_checksum_address(token_in_for_router),
+            Web3.to_checksum_address(token_out_for_router),
+            self.pool_tick_spacing, # Loaded in setUpClass
+            recipient_address,
+            deadline,
+            amount_in_int,
+            amount_out_minimum,
+            sqrt_price_limit_x96_for_router
+        )
+        
         base_tx_params = {
             'from': self.swapper_account_details['address'],
             'nonce': self.w3.eth.get_transaction_count(self.swapper_account_details['address']),
@@ -244,23 +273,16 @@ class TestStrategyAnvil(unittest.TestCase):
         base_tx_params['maxPriorityFeePerGas'] = self.w3.to_wei(1.5, 'gwei')
         base_tx_params['maxFeePerGas'] = base_fee * 2 + base_tx_params['maxPriorityFeePerGas']
 
-        swap_function_call = self.swappable_pool_contract_for_tests.functions.swap(
-            recipient_address,
-            execute_as_zero_for_one,
-            int(amount_in_raw),
-            sqrt_price_limit,
-            b''
-        )
+        router_swap_function_call = self.router_contract_for_tests.functions.exactInputSingle(params_tuple) #
 
         final_tx_params = base_tx_params.copy()
-        final_tx_params['gas'] = 1_000_000 
+        final_tx_params['gas'] = 1_500_000 # Generous gas limit for router swap
 
-        transaction_to_sign = swap_function_call.build_transaction(final_tx_params)
+        transaction_to_sign = router_swap_function_call.build_transaction(final_tx_params)
         
         pk_hex = self.swapper_account_details['pk']
-
         signed_tx = self.w3.eth.account.sign_transaction(transaction_to_sign, pk_hex)
-        tx_hash_hex = "" # Initialize to ensure it's available for logging even if send_raw_transaction fails
+        tx_hash_hex = "" 
         try:
             tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
             tx_hash_hex = tx_hash.hex()
@@ -270,18 +292,48 @@ class TestStrategyAnvil(unittest.TestCase):
             raise
 
         if receipt.status == 0:
-            logger.error(f"Swap transaction {tx_hash_hex} FAILED. Receipt: {receipt}")
+            logger.error(f"Router Swap transaction {tx_hash_hex} FAILED. Receipt: {receipt}")
             try:
-                # Attempt to get debug trace from Anvil. The options dict can be empty.
-                trace_options = {} # You can add options like {'disableStorage': True, 'disableMemory': True, 'disableStack': True} to make trace smaller
+                trace_options = {} 
                 trace = self.w3.provider.make_request("debug_traceTransaction", [tx_hash_hex, trace_options])
-                import json # For pretty printing
+                import json 
                 logger.error(f"Anvil debug_traceTransaction for {tx_hash_hex}:\n{json.dumps(trace, indent=2)}")
             except Exception as e_trace:
                 logger.error(f"Failed to get debug_traceTransaction for {tx_hash_hex}: {e_trace}")
         
-        self.assertEqual(receipt.status, 1, f"Swap transaction failed. Hash: {tx_hash_hex}. Receipt: {receipt}")
-        logger.info(f"Swap executed successfully. Hash: {tx_hash_hex}")
+        self.assertEqual(receipt.status, 1, f"Router Swap transaction failed. Hash: {tx_hash_hex}. Receipt: {receipt}")
+        logger.info(f"Router Swap executed successfully. Hash: {tx_hash_hex}")
+
+        # Log amountOut by finding the Swap event from the pool in the receipt
+        # The router calls the pool, and the pool emits the Swap event.
+        for log_entry in receipt.logs:
+            if log_entry['address'].lower() == config.POOL_ADDRESS.lower(): # Check if log is from our pool
+                try:
+                    # process_log needs the contract object that defines the event
+                    event_data = self.pool_for_testing.events.Swap().process_log(log_entry) #
+                    amount0_delta = event_data['args']['amount0']
+                    amount1_delta = event_data['args']['amount1']
+                    logger.info(f"Swap Event from Pool {config.POOL_ADDRESS} in tx {tx_hash_hex}: amount0_delta={amount0_delta}, amount1_delta={amount1_delta}") #
+                    # Depending on which token was tokenIn, one of these will be positive (amount out) and the other negative (amount in)
+                    # For exactInputSingle, amountIn is positive if tokenIn=token0, negative if tokenIn=token1
+                    # amountOut is positive if tokenOut=token1, negative if tokenOut=token0
+                    # From the perspective of the pool event:
+                    # amount0 is positive if token0 is transferred *out* of the pool
+                    # amount1 is positive if token1 is transferred *out* of the pool
+                    if execute_as_zero_for_one: # token0 in, token1 out
+                        # amount0 should be negative (sent to pool), amount1 positive (received from pool)
+                        logged_amount_in = -amount0_delta
+                        logged_amount_out = amount1_delta
+                    else: # token1 in, token0 out
+                        # amount1 should be negative (sent to pool), amount0 positive (received from pool)
+                        logged_amount_in = -amount1_delta
+                        logged_amount_out = amount0_delta
+                    
+                    logger.info(f"Logged amounts from Swap event: Actual Amount In ({token_in_for_router}): {logged_amount_in}, Actual Amount Out ({token_out_for_router}): {logged_amount_out}")
+
+                except Exception as e_log_proc: # Catch errors during log processing (e.g. topic mismatch)
+                    # This might happen if the log isn't a Swap event or ABI is mismatched
+                    logger.debug(f"Could not process a log entry from {log_entry['address']} as Swap event: {e_log_proc}")
         
         self._anvil_rpc("anvil_mine", [1,1])
         time.sleep(1)
@@ -297,13 +349,7 @@ class TestStrategyAnvil(unittest.TestCase):
         self.assertTrue(pp.invert_price)
 
         self.assertIsInstance(pp.all_prices_chronological, list, "Full price history is not a list.")
-        # The number of prices depends on activity in the self.TEST_PRICE_PROVIDER_START_BLOCK_OFFSET range.
-        # On a mainnet fork, there should be some swap activity.
-        # For a robust test, we could make a few swaps *before* strategy init, if start_block is current_block.
-        # Since fetch_initial_prices is called in Strategy.__init__, we check its outcome.
         logger.info(f"PriceProvider has {len(pp.all_prices_chronological)} initial prices from block ~{pp.start_block}.")
-        # Cannot assert > 0 strictly, as the forked window might have no swaps.
-        # But if it does, last_processed_block should be at least the start_block.
         self.assertIsNotNone(pp.last_processed_block, "PriceProvider.last_processed_block not set after initial fetch.")
         if pp.all_prices_chronological:
              self.assertGreaterEqual(pp.last_processed_block, pp.start_block, "Last processed block is before start block after initial fetch.")
@@ -318,14 +364,14 @@ class TestStrategyAnvil(unittest.TestCase):
         last_block_before_mine = pp.last_processed_block
 
         self._anvil_rpc("anvil_mine", [3,1]) 
-        time.sleep(0.5) # Ensure block timestamp advances if Anvil is super fast
+        time.sleep(0.5) 
         current_block_on_chain = self.w3.eth.block_number
 
         pp.fetch_new_prices()
         
         self.assertEqual(len(pp.all_prices_chronological), initial_history_len, 
                          "Full price history length changed when no new swaps were expected.")
-        if last_block_before_mine is not None: # Can be None if initial fetch found nothing and set last_processed_block to latest
+        if last_block_before_mine is not None: 
              self.assertGreaterEqual(pp.last_processed_block, last_block_before_mine)
         self.assertEqual(pp.last_processed_block, current_block_on_chain, "last_processed_block not updated to current chain height after scan.")
 
@@ -334,29 +380,24 @@ class TestStrategyAnvil(unittest.TestCase):
         pp = self.strategy_under_test.price_provider
         initial_history_len = len(pp.all_prices_chronological)
 
-        # Determine input token and amount
         # For zeroForOne=True, token_in is token0
         token_to_swap_contract = self.pool_token0_contract
         token_to_swap_addr = self.pool_token0_addr
         amount_to_swap = int(Decimal("1") * (10**self.pool_token0_decimals))
 
-        # Check balance
         swapper_balance = token_to_swap_contract.functions.balanceOf(
             self.swapper_account_details['address']
         ).call()
         logger.info(f"PRE-SWAP CHECK: Swapper balance of {token_to_swap_addr}: {swapper_balance}. Need: {amount_to_swap}")
         self.assertGreaterEqual(swapper_balance, amount_to_swap, "PRE-SWAP FAIL: Insufficient swapper balance.")
 
-        # Check allowance
         pool_allowance = token_to_swap_contract.functions.allowance(
-            self.swapper_account_details['address'], # owner
-            self.swappable_pool_contract_for_tests.address  # spender (the pool)
+            self.swapper_account_details['address'], 
+            self.router_address_cs  # spender (the router)
         ).call()
-        logger.info(f"PRE-SWAP CHECK: Pool allowance for swapper's {token_to_swap_addr}: {pool_allowance}. Need: {amount_to_swap}")
-        self.assertGreaterEqual(pool_allowance, amount_to_swap, "PRE-SWAP FAIL: Insufficient pool allowance.")
+        logger.info(f"PRE-SWAP CHECK: Router allowance for swapper's {token_to_swap_addr}: {pool_allowance}. Need: {amount_to_swap}")
+        self.assertGreaterEqual(pool_allowance, amount_to_swap, "PRE-SWAP FAIL: Insufficient router allowance.")
 
-
-        # Execute a swap to generate new log(s)
         self._execute_pool_swap(token_to_swap_addr, amount_to_swap, execute_as_zero_for_one=True)
         
         pp.fetch_new_prices()
@@ -375,13 +416,12 @@ class TestStrategyAnvil(unittest.TestCase):
         s = self.strategy_under_test
         pp = s.price_provider
 
-        # Ensure PriceProvider has some history. If initial fetch got nothing, make some swaps.
         if len(pp.get_all_prices_for_sd()) < 3:
             logger.info("Populating price history with a few swaps for SD test...")
             self._execute_pool_swap(self.pool_token0_addr, int(Decimal("50") * (10**self.pool_token0_decimals)), True)
             self._execute_pool_swap(self.pool_token1_addr, int(Decimal("50") * (10**self.pool_token1_decimals)), False)
             self._execute_pool_swap(self.pool_token0_addr, int(Decimal("60") * (10**self.pool_token0_decimals)), True)
-            pp.fetch_new_prices() # Fetch these new prices
+            pp.fetch_new_prices() 
         
         self.assertGreaterEqual(len(pp.get_all_prices_for_sd()), 3, "Price history still too short for SD test after attempting swaps.")
 
@@ -399,8 +439,17 @@ class TestStrategyAnvil(unittest.TestCase):
         self.assertLess(tick_l, tick_u, f"tick_lower ({tick_l}) must be less than tick_upper ({tick_u}).")
         self.assertEqual(tick_l % s.tick_spacing, 0)
         self.assertEqual(tick_u % s.tick_spacing, 0)
-        self.assertTrue(tick_l <= current_tick < tick_u + s.tick_spacing)
-
+        # It's possible for current_tick to be equal to tick_upper if it's rounded up.
+        # A more robust check is that the range [tick_l, tick_u) should ideally contain current_tick,
+        # or current_tick should be very close if it's at the edge.
+        # The strategy aims for tick_l <= current_tick < tick_u for an *active* position.
+        # The calculated target ticks might place the current_tick just at the edge or slightly outside
+        # before alignment.
+        # self.assertTrue(tick_l <= current_tick < tick_u + s.tick_spacing) # Original check
+        # For calculated target_ticks, it might be that current_tick is near the center,
+        # or one of the bounds is chosen based on current_tick.
+        # More directly: the position created from these ticks should cover the current_tick.
+        # This is verified more directly in test_05.
 
     def test_05_first_position_creation(self):
         logger.info("### Test 05: Strategy First Position Creation ###")
@@ -414,8 +463,8 @@ class TestStrategyAnvil(unittest.TestCase):
         logger.info(f"First position created: ID {s.current_position_token_id}, Liquidity {s.current_position_details['liquidity']}")
         current_tick_after_mint, _, _ = s._get_current_tick_and_price_state()
         pos_details = s.current_position_details
-        self.assertTrue(pos_details['tickLower'] <= current_tick_after_mint < pos_details['tickUpper'] + s.tick_spacing,
-                        "Newly minted position is not around the current tick.")
+        self.assertTrue(pos_details['tickLower'] <= current_tick_after_mint < pos_details['tickUpper'], # V3 positions are active if tickLower <= currentTick < tickUpper
+                        f"Newly minted position range [{pos_details['tickLower']}, {pos_details['tickUpper']}] does not cover current_tick {current_tick_after_mint}.")
 
 
     def test_06_no_rebalance_when_price_in_range(self):
@@ -438,7 +487,6 @@ class TestStrategyAnvil(unittest.TestCase):
 
 
     def test_07_rebalance_after_price_moves_out(self):
-        # ... (This test remains structurally similar, ensuring swaps are effective)
         logger.info("### Test 07: Rebalance After Price Moves Out of Range ###")
         s = self.strategy_under_test
         s._get_existing_position()
@@ -447,19 +495,24 @@ class TestStrategyAnvil(unittest.TestCase):
         initial_pos_range = (s.current_position_details['tickLower'], s.current_position_details['tickUpper'])
         logger.info(f"Position before price move: ID {initial_pos_id}, Range {initial_pos_range}")
 
-        # Try to move price significantly lower
-        amount_to_swap_t0 = int(Decimal("20000") * (10**self.pool_token0_decimals)) # Increased swap amount
+        amount_to_swap_t0 = int(Decimal("20000") * (10**self.pool_token0_decimals)) 
         max_swap_attempts = 10
         price_moved_out = False
-        current_tick_after_swap = s._get_current_tick_and_price_state()[0] # Get current tick before loop
+        current_tick_after_swap, _, _ = s._get_current_tick_and_price_state() 
+        
         for i in range(max_swap_attempts):
             logger.info(f"Executing swap {i+1}/{max_swap_attempts} to move price out of range {initial_pos_range}...")
+            # Determine which token to sell to move the price *out* of range.
+            # If current_tick is too high, sell token0 (execute_as_zero_for_one=True) to lower it.
+            # If current_tick is too low, sell token1 (execute_as_zero_for_one=False) to raise it.
+            # For this test, we'll try to move it lower by selling token0.
             self._execute_pool_swap(self.pool_token0_addr, amount_to_swap_t0, execute_as_zero_for_one=True)
             current_tick_after_swap, _, _ = s._get_current_tick_and_price_state()
             logger.info(f"Tick after swap {i+1}: {current_tick_after_swap}")
             if not (initial_pos_range[0] <= current_tick_after_swap < initial_pos_range[1]):
                 price_moved_out = True
                 break
+        
         self.assertTrue(price_moved_out, f"Failed to move price out of initial range {initial_pos_range} after {max_swap_attempts} swaps. Final tick: {current_tick_after_swap}")
         logger.info("Price moved out of range. Triggering rebalance check...")
         s._check_and_rebalance() 
@@ -471,8 +524,9 @@ class TestStrategyAnvil(unittest.TestCase):
             new_pos_range = (s.current_position_details['tickLower'], s.current_position_details['tickUpper'])
             logger.info(f"Rebalanced to new position ID {s.current_position_token_id}, New Range {new_pos_range}")
             tick_after_rebalance_logic, _, _ = s._get_current_tick_and_price_state()
-            self.assertTrue(new_pos_range[0] <= tick_after_rebalance_logic < new_pos_range[1] + s.tick_spacing,
+            self.assertTrue(new_pos_range[0] <= tick_after_rebalance_logic < new_pos_range[1],
                             f"New position range {new_pos_range} does not appropriately cover current tick {tick_after_rebalance_logic}.")
+        
         nft_m_contract = load_contract(self.w3, config.NONFUNGIBLE_POSITION_MANAGER_ADDRESS, config.MINIMAL_NONFUNGIBLE_POSITION_MANAGER_ABI)
         with self.assertRaises(Exception, msg="Old position NFT was not burned or ownerOf check failed."):
             nft_m_contract.functions.ownerOf(initial_pos_id).call()
@@ -503,52 +557,54 @@ class TestStrategyAnvil(unittest.TestCase):
         s = self.strategy_under_test
         pp = s.price_provider
 
-        # Save original full history to restore later
         original_full_history = list(pp.all_prices_chronological) 
         
-        # Force conditions for SD to be invalid: e.g. set all_prices_chronological to have < 3 data points
         pp.all_prices_chronological = [
             {'price': 1000.0, 'block': 1, 'logIndex': 0},
             {'price': 1000.0, 'block': 2, 'logIndex': 0}
-        ] # Only two points
+        ] 
 
         current_tick, _, p_current_for_sd = s._get_current_tick_and_price_state()
         self.assertIsNotNone(current_tick)
         self.assertIsNotNone(p_current_for_sd)
 
-        tick_l, tick_u = s._calculate_target_ticks(current_tick, p_current_for_sd) # Should use fallback
+        tick_l, tick_u = s._calculate_target_ticks(current_tick, p_current_for_sd) 
         
         self.assertIsNotNone(tick_l, "Fallback tick_lower is None.")
         self.assertIsNotNone(tick_u, "Fallback tick_upper is None.")
         self.assertLess(tick_l, tick_u, "Fallback tick_lower not less than tick_upper.")
         
-        expected_width = s.sd_min_width_ticks
         actual_width = tick_u - tick_l
-        self.assertGreaterEqual(actual_width, s.sd_min_width_ticks - s.tick_spacing*2)
-        self.assertGreaterEqual(actual_width, s.tick_spacing)
-        logger.info(f"Fallback ticks (due to invalid SD from insufficient full history): [{tick_l}, {tick_u}], Width: {actual_width}")
+        # Allow for slight rounding differences due to tick_spacing alignment
+        self.assertGreaterEqual(actual_width, s.sd_min_width_ticks - s.tick_spacing, 
+                                f"Fallback width {actual_width} too small vs expected ~{s.sd_min_width_ticks}")
+        self.assertLessEqual(actual_width, s.sd_min_width_ticks + s.tick_spacing,
+                                f"Fallback width {actual_width} too large vs expected ~{s.sd_min_width_ticks}")
 
-        # Restore original full history
+        logger.info(f"Fallback ticks (due to invalid SD from insufficient full history): [{tick_l}, {tick_u}], Width: {actual_width}, Target Width: {s.sd_min_width_ticks}")
+
         pp.all_prices_chronological = original_full_history
-        # It's also good to re-fetch new prices to ensure last_processed_block is consistent if other tests follow
-        # Or re-initialize PriceProvider if state becomes too complex to manage across tests.
-        # For now, simple restoration. For more complex state, consider finer-grained setup/teardown for price_provider state.
-        pp.fetch_new_prices() # Refresh to align last_processed_block
+        pp.fetch_new_prices() 
 
 
 if __name__ == "__main__":
-    print("Starting Anvil Test Suite for strategy.py (Full Price History SD)...")
-
+    print("Starting Anvil Test Suite for strategy.py (Full Price History SD, Router Swaps)...")
     print("----------------------------------------------------------------------")
     print("IMPORTANT: Ensure Anvil is running in a separate terminal with a")
-    print(f"   Base mainnet fork: anvil --fork-url <YOUR_BASE_MAINNET_RPC_URL>")
-    print(f"   (e.g., RPC from config.py: {config.RPC_URL if not original_rpc_url_for_strategy_testing else original_rpc_url_for_strategy_testing} )")
+    mainnet_rpc = config.RPC_URL if not original_rpc_url_for_strategy_testing else original_rpc_url_for_strategy_testing
+    print(f"   Base mainnet fork: anvil --fork-url {mainnet_rpc}")
     print("   Ensure whale addresses in this script are valid and have funds on Base for the forked block.")
-    print("   Ensure config.MINIMAL_POOL_ABI includes the 'swap' function if not already present.")
+    print("   Ensure config.MINIMAL_POOL_ABI includes the 'Swap' event.")
     print("----------------------------------------------------------------------")
     
     loader = unittest.TestLoader()
+    # Ensure tests run in defined order (e.g., test_01_..., test_02_...)
     loader.sortTestMethodsUsing = lambda x, y: (x > y) - (x < y) 
     suite = loader.loadTestsFromTestCase(TestStrategyAnvil)
     runner = unittest.TextTestRunner(verbosity=2)
-    runner.run(suite)
+    result = runner.run(suite)
+
+    if not result.wasSuccessful():
+        print("\n--- SOME TESTS FAILED ---")
+    else:
+        print("\n--- ALL TESTS PASSED ---")

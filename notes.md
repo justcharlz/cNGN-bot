@@ -11,4 +11,5 @@
 
 
 TODO:
-- Refactor swapper logic to use the SwapRouter's exactInput method instead
+- Look over Strategy logic and ensure tick calculation is correct at the boundaries
+- Fix minWidth and maxWidth for Strategy tick spacing

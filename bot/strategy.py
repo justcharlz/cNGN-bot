@@ -74,7 +74,7 @@ class PriceProvider:
             self.logger.warning(f"Error processing log entry to price: {e}. Log: {log_entry}")
             return None
 
-    def _fetch_logs_in_batches(self, from_block, to_block, batch_size=10000): # for BATCH_SIZE
+    def _fetch_logs_in_batches(self, from_block, to_block, batch_size=10000):
         """
         Helper to fetch logs in manageable batches, with retries for rate limits
         and other transient errors.
