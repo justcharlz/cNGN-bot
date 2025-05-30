@@ -1,7 +1,7 @@
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from eth_account import Account
-import config # Ensures this uses the potentially overridden config.RPC_URL from tests
+import bot.config as config
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s][%(filename)s:%(lineno)s] %(message)s")

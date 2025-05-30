@@ -13,3 +13,10 @@
 TODO:
 - Look over Strategy logic and ensure tick calculation is correct at the boundaries
 - Fix minWidth and maxWidth for Strategy tick spacing
+
+
+HOW TO RUN TESTS:
+1. Run "anvil --fork-url ..." and replace "..." with a Base mainnet RPC URL
+2. Open a new terminal window and go to cNGN directory
+3. To run all tests: "python -m unittest discover -s bot/tests"
+To run 

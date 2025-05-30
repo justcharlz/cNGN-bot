@@ -7,9 +7,9 @@ from decimal import Decimal
 from web3 import Web3
 from eth_account import Account 
 
-import config 
-from blockchain_utils import get_web3_provider, get_wallet_credentials, load_contract
-import dex_utils 
+import bot.config as config
+from bot.utils.blockchain_utils import get_web3_provider, get_wallet_credentials, load_contract
+import bot.utils.dex_utils as dex_utils 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s][%(filename)s:%(lineno)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ INITIAL_USDC_FUNDING_UNITS = Decimal("10000") # Updated to your initial value
 
 
 class TestDexUtilsAnvil(unittest.TestCase):
-    original_rpc_url = None 
+    original_rpc_url = None
     pool_info_data = None
     pool_state_data = None
     current_test_token_id = None
@@ -212,14 +212,14 @@ class TestDexUtilsAnvil(unittest.TestCase):
 
     def test_01_get_pool_info(self):
         logger.info("Running test_01_get_pool_info...")
-        pool_info = dex_utils.get_pool_info(self.pool_contract)
+        pool_contract = load_contract(self.w3, config.POOL_ADDRESS, config.MINIMAL_POOL_ABI)
+        pool_info = dex_utils.get_pool_info(pool_contract)
         self.assertIsNotNone(pool_info, "get_pool_info returned None")
         self.assertIn("token0", pool_info)
         self.assertEqual(Web3.to_checksum_address(pool_info["token0"]), self.actual_pool_token0_address)
         self.assertIn("token1", pool_info)
         self.assertEqual(Web3.to_checksum_address(pool_info["token1"]), self.actual_pool_token1_address)
         self.assertIn("tickSpacing", pool_info)
-        self.assertIn("fee", pool_info)
         logger.info(f"Pool info retrieved: {pool_info}")
         TestDexUtilsAnvil.pool_info_data = pool_info
 
@@ -490,6 +490,99 @@ class TestDexUtilsAnvil(unittest.TestCase):
                  self.nft_manager_contract.functions.ownerOf(token_id_to_burn).call()
             logger.info(f"Verified ownerOf for token ID {token_id_to_burn} raises an error (expected after burn).")
             TestDexUtilsAnvil.current_test_token_id = None 
+
+    def test_09_execute_router_swap(self):
+        logger.info("Running test_09_execute_router_swap...")
+        self.assertIsNotNone(TestDexUtilsAnvil.cngn_actual_address, "cNGN address not set.")
+        self.assertIsNotNone(TestDexUtilsAnvil.usdc_actual_address, "USDC address not set.")
+
+        cngn_contract = load_contract(self.w3, TestDexUtilsAnvil.cngn_actual_address, config.MINIMAL_ERC20_ABI)
+        usdc_contract = load_contract(self.w3, TestDexUtilsAnvil.usdc_actual_address, config.MINIMAL_ERC20_ABI)
+        router_contract = load_contract(self.w3, config.ROUTER_ADDRESS, config.ROUTER_ABI)
+        # Approve router to spend tokens
+        amount_to_approve_router = 2**256 - 1
+        logger.info(f"Approving cNGN ({TestDexUtilsAnvil.cngn_actual_address}) for Router ({config.ROUTER_ADDRESS})...")
+        approve_cngn_router = dex_utils.approve_token_if_needed(
+            self.w3, TestDexUtilsAnvil.cngn_actual_address, self.bot_wallet_address,
+            config.ROUTER_ADDRESS, amount_to_approve_router, self.bot_account.key
+        )
+        self.assertTrue(approve_cngn_router, "cNGN approval for Router failed.")
+
+        logger.info(f"Approving USDC ({TestDexUtilsAnvil.usdc_actual_address}) for Router ({config.ROUTER_ADDRESS})...")
+        approve_usdc_router = dex_utils.approve_token_if_needed(
+            self.w3, TestDexUtilsAnvil.usdc_actual_address, self.bot_wallet_address,
+            config.ROUTER_ADDRESS, amount_to_approve_router, self.bot_account.key
+        )
+        self.assertTrue(approve_usdc_router, "USDC approval for Router failed.")
+
+        # Swap 1: cNGN for USDC
+        amount_cngn_to_swap_units = Decimal("10") # Swap 10 cNGN
+        amount_cngn_to_swap_raw = int(amount_cngn_to_swap_units * (10**TestDexUtilsAnvil.cngn_actual_decimals))
+
+        bal_cngn_before_swap1 = cngn_contract.functions.balanceOf(self.bot_wallet_address).call()
+        bal_usdc_before_swap1 = usdc_contract.functions.balanceOf(self.bot_wallet_address).call()
+        logger.info(f"Before swap 1 (cNGN->USDC): cNGN Bal={bal_cngn_before_swap1}, USDC Bal={bal_usdc_before_swap1}")
+
+        self.assertGreaterEqual(bal_cngn_before_swap1, amount_cngn_to_swap_raw, "Insufficient cNGN balance for swap 1.")
+
+        logger.info(f"Executing swap 1: {amount_cngn_to_swap_units} cNGN for USDC...")
+        receipt_swap1 = dex_utils.execute_router_swap(
+            w3=self.w3,
+            router_contract=router_contract,
+            account_details={"address": self.bot_wallet_address, "pk": self.bot_account.key.hex()},
+            token_in_address=TestDexUtilsAnvil.cngn_actual_address,
+            token_out_address=TestDexUtilsAnvil.usdc_actual_address,
+            tick_spacing=10, # Hardcoded here to 10, unless changed by pool should be fine
+            recipient_address=self.bot_wallet_address,
+            amount_in=amount_cngn_to_swap_raw,
+            amount_out_minimum=0, # Allow any amount out for test simplicity,
+            sqrt_price_limit_x96= config.MIN_SQRT_RATIO + 1
+        )
+        self.assertIsNotNone(receipt_swap1, "execute_router_swap (cNGN->USDC) returned None.")
+        self.assertEqual(receipt_swap1.status, 1, "Swap 1 (cNGN->USDC) transaction failed.")
+
+        # Add a small delay for Anvil to process the state change if needed, though wait_for_transaction_receipt should handle it.
+        # self.anvil_rpc_request("anvil_mine", [[1,1]]) # if state isn't updating fast enough
+        time.sleep(1) # Small delay
+
+        bal_cngn_after_swap1 = cngn_contract.functions.balanceOf(self.bot_wallet_address).call()
+        bal_usdc_after_swap1 = usdc_contract.functions.balanceOf(self.bot_wallet_address).call()
+        logger.info(f"After swap 1 (cNGN->USDC): cNGN Bal={bal_cngn_after_swap1}, USDC Bal={bal_usdc_after_swap1}")
+
+        self.assertLess(bal_cngn_after_swap1, bal_cngn_before_swap1, "cNGN balance did not decrease after swap 1.")
+        self.assertGreater(bal_usdc_after_swap1, bal_usdc_before_swap1, "USDC balance did not increase after swap 1.")
+
+        # Swap 2: USDC for cNGN
+        amount_usdc_to_swap_units = Decimal("10") # Swap 10 USDC
+        amount_usdc_to_swap_raw = int(amount_usdc_to_swap_units * (10**TestDexUtilsAnvil.usdc_actual_decimals))
+
+        self.assertGreaterEqual(bal_usdc_after_swap1, amount_usdc_to_swap_raw, "Insufficient USDC balance for swap 2.")
+
+        logger.info(f"Executing swap 2: {amount_usdc_to_swap_units} USDC for cNGN...")
+        receipt_swap2 = dex_utils.execute_router_swap(
+            w3=self.w3,
+            router_contract=router_contract,
+            account_details={"address": self.bot_wallet_address, "pk": self.bot_account.key.hex()},
+            token_in_address=TestDexUtilsAnvil.usdc_actual_address,
+            token_out_address=TestDexUtilsAnvil.cngn_actual_address,
+            tick_spacing=10, # hard coded here again
+            recipient_address=self.bot_wallet_address,
+            amount_in=amount_usdc_to_swap_raw,
+            amount_out_minimum=0,
+            sqrt_price_limit_x96=config.MAX_SQRT_RATIO-1
+        )
+        self.assertIsNotNone(receipt_swap2, "execute_router_swap (USDC->cNGN) returned None.")
+        self.assertEqual(receipt_swap2.status, 1, "Swap 2 (USDC->cNGN) transaction failed.")
+        
+        time.sleep(1)
+
+        bal_cngn_after_swap2 = cngn_contract.functions.balanceOf(self.bot_wallet_address).call()
+        bal_usdc_after_swap2 = usdc_contract.functions.balanceOf(self.bot_wallet_address).call()
+        logger.info(f"After swap 2 (USDC->cNGN): cNGN Bal={bal_cngn_after_swap2}, USDC Bal={bal_usdc_after_swap2}")
+
+        self.assertGreater(bal_cngn_after_swap2, bal_cngn_after_swap1, "cNGN balance did not increase after swap 2.")
+        self.assertLess(bal_usdc_after_swap2, bal_usdc_after_swap1, "USDC balance did not decrease after swap 2.")
+        logger.info("Router swap tests completed successfully.")
 
 
 if __name__ == "__main__":

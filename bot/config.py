@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from decimal import Decimal
 
 load_dotenv() # Loads variables from a .env file if present
 
@@ -16,16 +17,20 @@ DUMMY_PRIVATE_KEY = os.getenv("PRIVATE_KEY", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 POOL_ADDRESS = "0x0206B696a410277eF692024C2B64CcF4EaC78589"
 NONFUNGIBLE_POSITION_MANAGER_ADDRESS = "0x827922686190790b37229fd06084350E74485b72"
 ROUTER_ADDRESS = "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5"
+MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342 # Used for setting swap limits
+MIN_SQRT_RATIO = 4295128739 # Used for setting swap limits
 # --- Token Configuration ---
 
 TOKEN0_ADDRESS = "0x46C85152bFe9f96829aA94755D9f915F9B10EF5F" # cNGN
 TOKEN1_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
-
 # --- Bot Configuration ---
 
 POLL_INTERVAL_SECONDS = 60  # How often to check the price and rebalance
 EIP1559_MIN_PRIORITY_FEE_GWEI = 1.5  # Minimum tip in Gwei (e.g., 1.5 Gwei)
 EIP1559_MAX_FEE_BASE_MULTIPLIER = 2.0 # Multiplier for baseFee to calculate maxFee (e.g., 2.0 means maxFee can be up to 2*baseFee + tip)
+
+Q96_DEC = Decimal(2**96) # For sqrtPriceX96 conversionQ96_DEC = Decimal(2**96) # For sqrtPriceX96 conversion
+
 
 # --- Minimal ABIs ---
 
@@ -58,7 +63,31 @@ MINIMAL_ERC20_ABI = """
         "payable": false,
         "stateMutability": "view",
         "type": "function"
-    }
+    },
+    {
+    "constant": false,
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "mint",
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "payable": false,
+    "stateMutability": "nonpayable",
+    "type": "function",
+    "signature": "0x40c10f19"
+  }
 ]
 """
 
