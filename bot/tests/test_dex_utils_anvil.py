@@ -8,6 +8,7 @@ from web3 import Web3
 from eth_account import Account 
 
 import bot.config as config
+from bot.config import TOKEN0_WHALE_ADDRESS, TOKEN1_WHALE_ADDRESS
 from bot.utils.blockchain_utils import get_web3_provider, get_wallet_credentials, load_contract
 import bot.utils.dex_utils as dex_utils 
 
@@ -16,15 +17,8 @@ logger = logging.getLogger(__name__)
 
 ANVIL_RPC_URL = "http://127.0.0.1:8545"
 
-CNGN_WHALE_ADDRESS = "0xF7Fceda4d895602de62E54E4289ECFA97B86EBea" 
-USDC_WHALE_ADDRESS = "0x122fDD9fEcbc82F7d4237C0549a5057E31c8EF8D" 
-
 ETH_TO_FUND_BOT = Web3.to_wei(10, 'ether') 
 ETH_FOR_WHALE_TX = Web3.to_wei(0.1, 'ether') # Amount of ETH to give whale for gas
-
-# Using Decimal for initial units before multiplying by 10**decimals
-INITIAL_CNGN_FUNDING_UNITS = Decimal("10000") # Updated to your initial value
-INITIAL_USDC_FUNDING_UNITS = Decimal("10000") # Updated to your initial value
 
 
 class TestDexUtilsAnvil(unittest.TestCase):
@@ -103,16 +97,14 @@ class TestDexUtilsAnvil(unittest.TestCase):
             logger.info(f"Mapped USDC: {TestDexUtilsAnvil.usdc_actual_address} (Decimals: {TestDexUtilsAnvil.usdc_actual_decimals})")
 
             # Fund with cNGN
-            cngn_amount_to_fund = int(INITIAL_CNGN_FUNDING_UNITS * (10**TestDexUtilsAnvil.cngn_actual_decimals))
             cls.fund_account_with_erc20(
                 cls.bot_wallet_address, TestDexUtilsAnvil.cngn_actual_address, 
-                CNGN_WHALE_ADDRESS, cngn_amount_to_fund, "cNGN"
+                TOKEN0_WHALE_ADDRESS, "cNGN"
             )
             # Fund with USDC
-            usdc_amount_to_fund = int(INITIAL_USDC_FUNDING_UNITS * (10**TestDexUtilsAnvil.usdc_actual_decimals))
             cls.fund_account_with_erc20(
                 cls.bot_wallet_address, TestDexUtilsAnvil.usdc_actual_address, 
-                USDC_WHALE_ADDRESS, usdc_amount_to_fund, "USDC"
+                TOKEN1_WHALE_ADDRESS, "USDC"
             )
 
         except Exception as e:
@@ -153,13 +145,13 @@ class TestDexUtilsAnvil(unittest.TestCase):
 
 
     @classmethod
-    def fund_account_with_erc20(cls, recipient_address, token_address, whale_address, amount_smallest_unit, token_symbol="Token"):
+    def fund_account_with_erc20(cls, recipient_address, token_address, whale_address, token_symbol="Token"):
         if "0xSOME_" in whale_address.upper() or not whale_address or not Web3.is_address(whale_address): # More robust check
             logger.warning(f"Skipping ERC20 funding for {token_symbol} ({token_address}) as whale address is a placeholder or invalid: '{whale_address}'")
             logger.warning(f"CRITICAL: You MUST set a valid EOA whale address for {token_symbol} in test_dex_utils_anvil.py.")
             return False 
 
-        logger.info(f"Attempting to fund {recipient_address} with {amount_smallest_unit} of {token_symbol} ({token_address}) from whale {whale_address}...")
+        logger.info(f"Attempting to fund {recipient_address} with whale's full balance of {token_symbol} ({token_address}) from whale {whale_address}...")
         token_contract = load_contract(cls.w3, token_address, config.MINIMAL_ERC20_ABI)
         if not token_contract:
             logger.error(f"Failed to load token {token_address} for funding.")
@@ -176,18 +168,13 @@ class TestDexUtilsAnvil(unittest.TestCase):
         try:
             whale_balance_before = token_contract.functions.balanceOf(whale_address).call()
             logger.info(f"Whale {whale_address} balance of {token_symbol} before transfer: {whale_balance_before}")
-            if whale_balance_before < amount_smallest_unit:
-                logger.error(f"Whale {whale_address} does not have enough {token_symbol} ({whale_balance_before}) to transfer {amount_smallest_unit}.")
-                # Stop impersonating even if transfer fails or is skipped
-                cls.anvil_rpc_request("anvil_stopImpersonatingAccount", [whale_address])
-                return False 
 
-            tx_hash = token_contract.functions.transfer(recipient_address, amount_smallest_unit).transact({'from': whale_address})
+            tx_hash = token_contract.functions.transfer(recipient_address, whale_balance_before).transact({'from': whale_address})
             receipt = cls.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60) 
             if receipt.status != 1:
                 logger.error(f"ERC20 transfer from whale failed: {receipt}")
             else:
-                logger.info(f"Successfully transferred {amount_smallest_unit} of {token_symbol} to {recipient_address}")
+                logger.info(f"Successfully transferred {whale_balance_before} of {token_symbol} to {recipient_address}")
                 funded_successfully = True
         except Exception as e:
             logger.error(f"Error transferring ERC20 from whale: {e}", exc_info=True)
@@ -198,8 +185,8 @@ class TestDexUtilsAnvil(unittest.TestCase):
         if funded_successfully:
             balance = token_contract.functions.balanceOf(recipient_address).call()
             logger.info(f"New {token_symbol} balance for {recipient_address}: {balance}")
-            if balance < amount_smallest_unit:
-                 logger.warning(f"Recipient {token_symbol} balance ({balance}) is less than requested amount ({amount_smallest_unit}). Funding may have effectively failed or partial transfer occurred.")
+            if balance < whale_balance_before:
+                 logger.warning(f"Recipient {token_symbol} balance ({balance}) is less than requested full amount ({whale_balance_before}). Funding may have effectively failed or partial transfer occurred.")
                  # Depending on strictness, you might want to return False here too
             # self.assertGreaterEqual(balance, amount_smallest_unit, f"ERC20 funding for {token_symbol} failed or whale had insufficient funds.")
         else: # If transfer didn't succeed
@@ -594,6 +581,5 @@ if __name__ == "__main__":
     if hasattr(TestDexUtilsAnvil, 'original_rpc_url') and TestDexUtilsAnvil.original_rpc_url is not None:
         original_rpc_for_display = TestDexUtilsAnvil.original_rpc_url
     print(f"  (Your config.py mainnet RPC_URL is expected to be: {original_rpc_for_display})")
-    print("You also MUST replace placeholder CNGN_WHALE_ADDRESS and USDC_WHALE_ADDRESS in this test script with valid EOAs.")
     print("--------------------------------------------------")
     unittest.main()

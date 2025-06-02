@@ -8,6 +8,7 @@ from web3 import Web3
 import os
 
 import bot.config as config
+from bot.config import TOKEN0_WHALE_ADDRESS, TOKEN1_WHALE_ADDRESS, TOKEN0_WHALE_ADDRESS_TEST7, TOKEN1_WHALE_ADDRESS_TEST7
 from bot.utils.blockchain_utils import get_web3_provider, get_wallet_credentials, load_contract
 from bot.strategy import Strategy 
 from bot.price_provider import PriceProvider 
@@ -19,8 +20,6 @@ if not logging.getLogger().hasHandlers():
 logger = logging.getLogger(__name__)
 
 ANVIL_RPC_URL = "http://127.0.0.1:8545"
-TOKEN0_WHALE_ADDRESS = "0xF7Fceda4d895602de62E54E4289ECFA97B86EBea" 
-TOKEN1_WHALE_ADDRESS = "0x122fDD9fEcbc82F7d4237C0549a5057E31c8EF8D" 
 
 ETH_TO_FUND_ACCOUNTS = Web3.to_wei(10, 'ether')
 ETH_FOR_WHALE_OPERATIONS = Web3.to_wei(0.5, 'ether')
@@ -148,6 +147,19 @@ class TestStrategyAnvil(unittest.TestCase):
         balance = cls.w3.eth.get_balance(account_address_cs)
         assert balance >= amount_wei, f"ETH funding failed for {account_address_cs}"
         logger.debug(f"ETH Balance for {account_address_cs}: {cls.w3.from_wei(balance, 'ether')} ETH")
+
+    @classmethod
+    def anvil_rpc_request(cls, method, params):
+        try:
+            response = cls.w3.provider.make_request(method, params)
+            if "error" in response:
+                logger.error(f"Anvil RPC error for {method}: {response['error']}")
+                return None
+            return response.get("result")
+        except Exception as e:
+            logger.error(f"Exception during Anvil RPC request {method}: {e}")
+            return None
+
 
     @classmethod
     def _fund_account_erc20(cls, recipient_addr_cs, token_addr_cs, whale_addr_cs, amount_raw, token_sym=""):
@@ -473,131 +485,145 @@ class TestStrategyAnvil(unittest.TestCase):
     def test_07_rebalance_after_price_moves_out(self):
         logger.info("### Test 07: Rebalance After Price Moves Out of Range ###")
         s = self.strategy_under_test
+
+        # ─── STEP 0: If there is an existing position, remove it. Then create a fresh LP position with min_width=10 ───
         s._get_existing_position()
         if s.current_position_token_id:
             s._remove_position(s.current_position_token_id)
-        # ─── Step 0: create a fresh LP position with min_width=10 and fallback tick range ───
+
         s.min_tick_width = 10
         current_tick, _, _ = s._get_current_tick_and_price_state()
         tick_lower, tick_upper = s._fallback_ticks(current_tick)
-        logger.info(f"Creating new LP position with min_width=10, tick range ({tick_lower}, {tick_upper})…")
-        new_token_id = s._create_new_position(tick_lower, tick_upper)
-        self.assertIsNotNone(new_token_id, "Failed to create new LP position for Test 07.")
-        # after mint, Strategy._create_new_position will have populated `s.current_position_details`
-        self.assertIsNotNone(s.current_position_details,
-                            "Position details missing after LP creation for Test 07.")
+        initial_pos_range = [tick_lower, tick_upper]
+        logger.info(f"Creating new LP position with min_width=10, range ({tick_lower},{tick_upper})…")
+        initial_pos_id = s._create_new_position(tick_lower, tick_upper)
+        self.assertIsNotNone(initial_pos_id, "Failed to create new LP position for Test 07.")
+        self.assertIsNotNone(s.current_position_details, "Position details missing after LP creation.")
 
-        initial_pos_id = new_token_id
-        initial_pos_range = (
-            s.current_position_details['tickLower'],
-            s.current_position_details['tickUpper'],
-        )
-        logger.info(f"Position before price move: ID {initial_pos_id}, Range {initial_pos_range}")
+        # ─── STEP 0.5: Impersonate the USDC whale and fund swapper with the whale’s full balance ───
+        USDC_DECIMALS = 6                         # USDC typically uses 6 decimals
+        usdc_contract = load_contract(self.w3, self.pool_token1_addr, config.MINIMAL_ERC20_ABI)
 
-        # ─── Step 1: move price out of that range ───
-        amount_to_swap_t1_raw = 16_000_000_000
-        max_swap_attempts = 50
-        price_moved_out = False
-        current_tick_after_swap, _, _ = s._get_current_tick_and_price_state()
+        # 1) Read the whale’s actual USDC balance:
+        whale_balance_usdc = usdc_contract.functions.balanceOf(TOKEN1_WHALE_ADDRESS_TEST7).call()
+        logger.info(f"USDC whale’s current balance: {whale_balance_usdc}.")
 
-        # --- approve router ---
-        amount_to_approve_router = 2**256 - 1
-        logger.info(f"Approving cNGN ({self.pool_token0_addr}) for Router ({config.ROUTER_ADDRESS})…")
-        self.assertTrue(
-            dex_utils.approve_token_if_needed(
-                self.w3,
-                self.pool_token0_addr,
-                self.swapper_account_details['address'],
-                config.ROUTER_ADDRESS,
-                amount_to_approve_router,
-                self.swapper_account_details['pk'],
-            ),
-            "cNGN approval for Router failed."
+        # If the whale has zero, the test cannot proceed:
+        self.assertGreater(
+            whale_balance_usdc,
+            0,
+            f"USDC whale {TOKEN1_WHALE_ADDRESS_TEST7} has zero USDC; cannot fund swapper."
         )
 
-        logger.info(f"Approving USDC ({self.pool_token1_addr}) for Router ({config.ROUTER_ADDRESS})…")
-        self.assertTrue(
-            dex_utils.approve_token_if_needed(
-                self.w3,
-                self.pool_token1_addr,
-                self.swapper_account_details['address'],
-                config.ROUTER_ADDRESS,
-                amount_to_approve_router,
-                self.swapper_account_details['pk'],
-            ),
-            "USDC approval for Router failed."
+        # 2) Use _fund_account_erc20 to transfer the entire balance to the swapper:
+        self._fund_account_erc20(
+            self.swapper_account_details['address'],   # recipient
+            self.pool_token1_addr,                     # USDC token address
+            TOKEN1_WHALE_ADDRESS_TEST7,                # USDC whale address
+            whale_balance_usdc,                        # full whale balance
+            "USDC"
+        )
+        # 3) Mine a block so balances update
+        self.anvil_rpc_request("anvil_mine", [1, 1])
+
+        # 4) Confirm the strategy wallet’s cNGN balance is now > 0
+        new_usdc_balance = usdc_contract.functions.balanceOf(self.strategy_under_test.wallet_address).call()
+        logger.info(f"Strategy wallet’s new cNGN balance: {new_usdc_balance}.")
+        self.assertGreater(
+            new_usdc_balance,
+            0,
+            "Strategy wallet still has zero USDC after funding; cannot mint inside the range."
         )
 
-        for i in range(max_swap_attempts):
-            prev_tick = current_tick_after_swap
-            logger.info(
-                f"Swap {i+1}/{max_swap_attempts} – "
-                f"current tick {prev_tick}, target range {initial_pos_range}"
-            )
+        cngn_contract = load_contract(self.w3, self.pool_token0_addr, config.MINIMAL_ERC20_ABI)
+        whale_balance_cngn = cngn_contract.functions.balanceOf(TOKEN0_WHALE_ADDRESS_TEST7).call()
+        logger.info(f"cNGN whale’s current balance: {whale_balance_cngn}.")
 
-            dex_utils.execute_router_swap(
-                w3=self.w3,
-                router_contract=self.router_contract_for_tests,
-                account_details=self.swapper_account_details,
-                token_in_address=self.pool_token0_addr,   # buy token1 to push cNGN price down 
-                token_out_address=self.pool_token1_addr,
-                tick_spacing=self.pool_tick_spacing,
-                recipient_address=self.swapper_account_details['address'],
-                amount_in=amount_to_swap_t1_raw,
-                amount_out_minimum=0,
-                sqrt_price_limit_x96=config.MIN_SQRT_RATIO + 1,
-            )
-            self._anvil_rpc("anvil_mine", [1, 1])
-            time.sleep(3)
-
-            s.price_provider.fetch_new_prices()
-            current_tick_after_swap, _, p_oriented = s._get_current_tick_and_price_state()
-            logger.info(
-                f"Tick after swap {i+1}: {current_tick_after_swap} "
-                f"(oriented price: {p_oriented:.6f}), prev: {prev_tick}"
-            )
-
-            if current_tick_after_swap != prev_tick:
-                logger.info(f"Tick changed: {prev_tick} → {current_tick_after_swap}")
-            else:
-                logger.warning(
-                    f"No tick change on swap {i+1}. "
-                    "Check liquidity or increase swap size."
-                )
-
-            if not (initial_pos_range[0] <= current_tick_after_swap < initial_pos_range[1]):
-                logger.info(
-                    f"Price moved out of range: tick {current_tick_after_swap} "
-                    f"is outside {initial_pos_range}."
-                )
-                price_moved_out = True
-                break
-
-            if i == max_swap_attempts - 1:
-                logger.warning(
-                    f"Reached max swaps; price still within {initial_pos_range}. "
-                    f"Final tick: {current_tick_after_swap}"
-                )
-
-        self.assertTrue(
-            price_moved_out,
-            f"Failed to move price out of initial range {initial_pos_range} "
-            f"after {max_swap_attempts} swaps; final tick {current_tick_after_swap}."
+        # If the whale has zero, the test cannot proceed:
+        self.assertGreater(
+            whale_balance_cngn,
+            0,
+            f"cNGN whale {TOKEN0_WHALE_ADDRESS_TEST7} has zero cNGN; cannot fund strategy."
         )
 
-        # ─── Step 2: trigger rebalance ───
-        logger.info("Price moved out of range; running rebalance…")
+        # 5) Use _fund_account_erc20 to transfer the entire cNGN balance to the strategy wallet:
+        self._fund_account_erc20(
+            self.strategy_under_test.wallet_address,  # recipient
+            self.pool_token0_addr,                     # cNGN token address
+            TOKEN0_WHALE_ADDRESS_TEST7,                # cNGN whale address
+            whale_balance_cngn,                        # full whale balance
+            "cNGN"
+        )
+        # 6) Mine a block so balances update
+        self.anvil_rpc_request("anvil_mine", [1, 1])
+
+        # 7) Confirm the strategy wallet’s cNGN balance is now > 0
+        new_cngn_balance = cngn_contract.functions.balanceOf(self.strategy_under_test.wallet_address).call()
+        logger.info(f"Strategy wallet’s new cNGN balance: {new_cngn_balance} (smallest unit).")
+        self.assertGreater(
+            new_cngn_balance,
+            0,
+            "Strategy wallet still has zero cNGN after funding; cannot mint inside the range."
+        )
+        # 8) Set huge amount of USDC to swap -> push current tick out of initial position's range
+        funding_amount = new_usdc_balance / 1000
+        funding_amount = int(round(funding_amount, 0))
+       
+        # ─── STEP 1: Approve the Router to spend exactly `funding_amount` USDC ───
+        logger.info(f"Approving Router to spend {funding_amount} USDC (entire funded amount)…")
+        approved = dex_utils.approve_token_if_needed(
+            self.w3,
+            self.pool_token1_addr,            # USDC address
+            self.swapper_account_details['address'],
+            config.ROUTER_ADDRESS,
+            funding_amount,
+            self.swapper_account_details['pk']
+        )
+        self.assertTrue(approved, "Router approval of USDC failed.")
+
+        # ─── STEP 2: Execute  a giant swap (USDC → cNGN) to move price out of range ───
+        logger.info(
+            f"Executing giant swap: {funding_amount / ((10 ** USDC_DECIMALS)):,} USDC → cNGN …"
+        )
+        dex_utils.execute_router_swap(
+            w3=self.w3,
+            router_contract=self.router_contract_for_tests,
+            account_details=self.swapper_account_details,
+            token_in_address=self.pool_token1_addr,   # USDC
+            token_out_address=self.pool_token0_addr,  # cNGN
+            tick_spacing=self.pool_tick_spacing,
+            recipient_address=self.swapper_account_details['address'],
+            amount_in=funding_amount,
+            amount_out_minimum=0,
+            # Push price up to the top of the range
+            sqrt_price_limit_x96=config.MAX_SQRT_RATIO - 1,
+        )
+        self.anvil_rpc_request("anvil_mine", [1, 1])
+        time.sleep(3)
+
+        s.price_provider.fetch_new_prices()
+        current_tick_after_swap, _, p_oriented = s._get_current_tick_and_price_state()
+        logger.info(
+            f"After giant swap, current tick is {current_tick_after_swap} "
+            f"(oriented price: {p_oriented:.6f})"
+        )
+
+        # Verify tick has moved completely outside the LP’s original range
+        self.assertFalse(
+            initial_pos_range[0] <= current_tick_after_swap < initial_pos_range[1],
+            f"Tick {current_tick_after_swap} still inside {initial_pos_range} after giant swap."
+        )
+
+        # ─── STEP 3: Now that price is out of range, call rebalance ───
+        logger.info("Price out of range; calling _check_and_rebalance()…")
         s._check_and_rebalance()
-        s._get_existing_position()
-        self.assertIsNotNone(s.current_position_token_id,
-                            "Rebalance failed: no new position minted.")
+        self.assertIsNotNone(s.current_position_token_id, "Rebalance failed: no new position.")
         self.assertNotEqual(
             s.current_position_token_id,
             initial_pos_id,
             "Rebalance failed: position ID did not change."
         )
-        self.assertIsNotNone(s.current_position_details,
-                            "Rebalance failed: new position details missing.")
+        self.assertIsNotNone(s.current_position_details, "Rebalance failed: new position missing.")
         if s.current_position_details:
             self.assertGreater(
                 s.current_position_details['liquidity'],
@@ -606,22 +632,22 @@ class TestStrategyAnvil(unittest.TestCase):
             )
             new_range = (
                 s.current_position_details['tickLower'],
-                s.current_position_details['tickUpper'],
+                s.current_position_details['tickUpper']
             )
-            logger.info(
-                f"Rebalanced to new position ID {s.current_position_token_id}, range {new_range}"
-            )
+            logger.info(f"Rebalanced to new position ID {s.current_position_token_id}, Range {new_range}")
             tick_post, _, _ = s._get_current_tick_and_price_state()
             self.assertTrue(
                 new_range[0] <= tick_post < new_range[1],
                 f"New range {new_range} does not cover tick {tick_post}."
             )
 
-        # ─── Step 3: ensure old NFT was burned ───
-        with self.assertRaises(Exception,
-                            msg=f"Old position ID {initial_pos_id} should be burned."):
+        # ─── STEP 4: Ensure the old NFT was burned ───
+        with self.assertRaises(Exception, msg=f"Old position ID {initial_pos_id} should be burned."):
             s.nft_manager_contract.functions.ownerOf(initial_pos_id).call()
-        logger.info(f"Verified old position {initial_pos_id} is no longer valid.")
+        logger.info(f"Verified old position ID {initial_pos_id} is no longer valid (burned).")
+
+
+
 
 
     def test_08_position_removal(self):

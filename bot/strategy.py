@@ -292,8 +292,13 @@ class Strategy:
         balance0 = self.token0_contract.functions.balanceOf(self.wallet_address).call()
         balance1 = self.token1_contract.functions.balanceOf(self.wallet_address).call()
         self.logger.info(f"Available balances for minting: Token0 ({self.token0_address}) = {balance0}, Token1 ({self.token1_address}) = {balance1}")
-        if balance0 == 0 and balance1 == 0:
-            self.logger.error("Cannot mint new position: Zero balance for both tokens.")
+        # Aeordrome requires both token0 AND token1 if price is strictly inside [tick_lower, tick_upper].
+        # So if *either* side is zero, we cannot mint inside that range; bail out immediately.
+        if balance0 == 0 or balance1 == 0:
+            self.logger.error(
+                "Cannot mint new position: Both token0 and token1 are required to be nonzero "
+                f"when price is inside the chosen ticks. (balance0={balance0}, balance1={balance1})"
+            )
             return None
         
         if self.current_position_token_id or self.current_position_details:
@@ -319,7 +324,7 @@ class Strategy:
             self.token0_address, self.token1_address, self.tick_spacing, 
             tick_lower_int, tick_upper_int, amount0_desired, amount1_desired,
             amount0_min, amount1_min, self.wallet_address,
-            deadline, 0 # 0 for tokenId, indicating a new position mint rather than adding to existing via different method
+            deadline, 0
         )
 
         self.logger.info(f"Calling dex_utils.mint_new_position with params: {mint_call_params}")
@@ -387,9 +392,9 @@ class Strategy:
         
         if burn_success:
             self.logger.info(f"Successfully burned NFT {token_id}.")
-            if self.current_position_token_id == token_id: # Clear local state
-                self.current_position_token_id = None
-                self.current_position_details = None
+            # Clear local state
+            self.current_position_token_id = None
+            self.current_position_details = None
             return True
         else:
             self.logger.error(f"Failed to burn NFT {token_id}.")
@@ -414,6 +419,7 @@ class Strategy:
         if not self.current_position_token_id:
             self.logger.info("No existing managed position found. Creating a new one.")
             target_tick_lower, target_tick_upper = self._calculate_target_ticks(current_tick, p_current_for_sd)
+            self.logger.info(f"Calculated target ticks after calling _check_and_rebalance and no current position is active: {target_tick_lower} and {target_tick_upper}. About to _create_new_position")
             self.current_position_token_id = self._create_new_position(target_tick_lower, target_tick_upper)
             if self.current_position_token_id is None:
                 self.logger.error("Create new LP position failed, no NFT ID returned")
@@ -435,7 +441,7 @@ class Strategy:
                     return
                 
                 self.logger.info("Old position successfully removed.")
-                self.current_position_token_id = None # Ensure it's cleared
+                self.current_position_token_id = None # Double check to ensure it's cleared
                 self.current_position_details = None
 
                 self.logger.info("Step 2: Creating new position at new target ticks...")

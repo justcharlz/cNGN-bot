@@ -195,6 +195,7 @@ def _estimate_and_build_tx(w3, contract_function_prepared_with_args, from_addres
         return None 
 
     gas_estimation_dict = {'from': from_address, 'to': to_contract_address, 'value': value_wei, 'data': encoded_data}
+    estimated_gas = None
     
     try:
         estimated_gas = w3.eth.estimate_gas(gas_estimation_dict)
@@ -204,14 +205,18 @@ def _estimate_and_build_tx(w3, contract_function_prepared_with_args, from_addres
         # Log common revert reasons if available in exception (depends on Web3.py version and provider)
         if hasattr(e, 'message') and e.message: logger.error(f"GasEst Revert Msg: {e.message}")
         if hasattr(e, 'data') and e.data: logger.error(f"GasEst Revert Data: {e.data}")
-        return None 
+        # Let web3py try again to estimate from the maxFeePerGas and maxPriorityFeePerGas set in build_eip1559_transaction_params 
+        raise
+
 
     tx_params = build_eip1559_transaction_params(w3, from_address, 
                                                  to_address=to_contract_address, 
                                                  value_wei=value_wei) 
-    
-    tx_params['gas'] = int(estimated_gas * getattr(config, 'GAS_LIMIT_MULTIPLIER', 1.2))
-    tx_params['data'] = encoded_data
+    if encoded_data:
+        tx_params['data'] = encoded_data
+    if estimated_gas:
+        tx_params['gas'] = int(estimated_gas * getattr(config, 'GAS_LIMIT_MULTIPLIER', 1.2))
+
     return tx_params
 
 

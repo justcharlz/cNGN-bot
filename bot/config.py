@@ -6,7 +6,7 @@ load_dotenv() # Loads variables from a .env file if present
 
 # --- Blockchain Configuration ---
 
-RPC_URL = "https://base-mainnet.infura.io/v3/35fbbf13c9134267aa47e7acd9242abf"
+RPC_URL = "https://base-sepolia.infura.io/v3/066b8bc0a242467f8dada4b0c7f73817"
 CHAIN_ID = 8453
 
 # --- Wallet Configuration ---
@@ -23,6 +23,10 @@ MIN_SQRT_RATIO = 4295128739 # Used for setting swap limits
 
 TOKEN0_ADDRESS = "0x46C85152bFe9f96829aA94755D9f915F9B10EF5F" # cNGN
 TOKEN1_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+TOKEN0_WHALE_ADDRESS = "0xF7Fceda4d895602de62E54E4289ECFA97B86EBea" 
+TOKEN1_WHALE_ADDRESS = "0x122fDD9fEcbc82F7d4237C0549a5057E31c8EF8D" 
+TOKEN0_WHALE_ADDRESS_TEST7 = "0x107a7F8d51F75f48082294E8FacEdcc1C29CCca3"
+TOKEN1_WHALE_ADDRESS_TEST7 = "0x0B0A5886664376F59C351ba3f598C8A8B4D0A6f3"
 # --- Bot Configuration ---
 
 POLL_INTERVAL_SECONDS = 60  # How often to check the price and rebalance

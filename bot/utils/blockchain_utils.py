@@ -9,7 +9,7 @@ logger_bc_utils = logging.getLogger(__name__) # Use a distinct logger name
 
 def get_web3_provider():
     """Initializes and returns a Web3 provider."""
-    provider = Web3(Web3.HTTPProvider(config.RPC_URL)) # config.RPC_URL will be ANVIL_RPC_URL during tests
+    provider = Web3(Web3.HTTPProvider(config.RPC_URL, request_kwargs={"timeout": 120} )) # config.RPC_URL will be ANVIL_RPC_URL during tests
     if not provider.is_connected():
         logger_bc_utils.error(f"Failed to connect to RPC URL: {config.RPC_URL}")
         raise ConnectionError(f"Unable to connect to {config.RPC_URL}")
