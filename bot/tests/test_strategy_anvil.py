@@ -104,7 +104,7 @@ class TestStrategyAnvil(unittest.TestCase):
             cls._approve_erc20_for_spender(owner_acc_details=cls.bot_account_details, token_contract=cls.pool_token1_contract, spender_address=cls.router_address_cs, amount=(2**256 - 1))
 
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            cls.cache_dir = os.path.join(current_dir, ".test_cache") 
+            cls.cache_dir = os.path.join(current_dir, ".true_cache") 
             os.makedirs(cls.cache_dir, exist_ok=True)
             cls.price_cache_file = os.path.join(cls.cache_dir, f"price_cache_for_{config.POOL_ADDRESS.replace('0x', '')[:10]}.csv")
             logger.info(f"Price history cache will be stored/read from: {cls.price_cache_file}")

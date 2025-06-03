@@ -5,7 +5,7 @@
     - ^ integrate Chainlink feed into on-chain rebalancing bots?
 - Calculating current holdings for a position requires some nuance due to the pool's curve not being constant product(?)
 - ^Need this in order to calculate IL + backtest current strategy
-    - Derive from first principles by using prior work below:
+    - Derive from first principles by using prior work below
     - https://atiselsts.github.io/pdfs/uniswap-v3-liquidity-math.pdf
     - https://blog.uniswap.org/uniswap-v3-math-primer-2
 
@@ -20,7 +20,8 @@
     - New mint will fail though
     - Assuming that USDC should always be stronger than cNGN, then this seems more like a feature than a bug
 
-
+TODO:
+    - Backtesting module which provides liquidity right after pool creation, simulates historical swaps, and tracks fees and LVR
 
 HOW TO RUN TESTS:
 1. Run "anvil --fork-url ..." and replace "..." with a Base mainnet RPC URL

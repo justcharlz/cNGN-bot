@@ -3,6 +3,7 @@ import logging
 from decimal import Decimal
 import math
 import pandas as pd
+import os
 
 import bot.config as config
 from bot.utils.blockchain_utils import get_web3_provider, get_wallet_credentials, load_contract
@@ -499,13 +500,19 @@ if __name__ == '__main__':
         sd_multi = getattr(config, 'SD_MULTIPLE', 1.0)         # e.g., 1.0 for 1x SD, 1.5 for 1.5x SD
         min_width = getattr(config, 'MIN_TICK_WIDTH', 200)     # Min ticks, e.g., 20 * 10 (tick_spacing)
         max_width = getattr(config, 'MAX_TICK_WIDTH', None)  # Max ticks, e.g., 2000, or None for no cap
-
+        
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        cache_dir = os.path.join(current_dir, ".true_cache") 
+        os.makedirs(cache_dir, exist_ok=True)
+        price_cache_file = os.path.join(cache_dir, f"price_cache_for_cNGN_USDC.csv")
+        
         strategy_bot = Strategy(
             sd_calculation_points=sd_points,
             sd_multiple=float(sd_multi), # Ensure float if coming from string config
             min_tick_width=int(min_width),
             max_tick_width=int(max_width) if max_width is not None else None,
-            price_provider_start_block=start_block_for_strategy
+            price_provider_start_block=start_block_for_strategy,
+            price_provider_cache_path=price_cache_file
         )
         strategy_bot.run()
     except ConnectionError as ce:

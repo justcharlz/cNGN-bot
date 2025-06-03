@@ -6,7 +6,7 @@ load_dotenv() # Loads variables from a .env file if present
 
 # --- Blockchain Configuration ---
 
-RPC_URL = "https://base-sepolia.infura.io/v3/066b8bc0a242467f8dada4b0c7f73817"
+RPC_URL = "https://base-mainnet.infura.io/v3/35fbbf13c9134267aa47e7acd9242abf"
 CHAIN_ID = 8453
 
 # --- Wallet Configuration ---
