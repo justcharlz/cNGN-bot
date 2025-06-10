@@ -5,15 +5,12 @@ from decimal import Decimal
 load_dotenv() # Loads variables from a .env file if present
 
 # --- Blockchain Configuration ---
-
-RPC_URL = "https://base-mainnet.infura.io/v3/35fbbf13c9134267aa47e7acd9242abf"
+RPC_URL = os.getenv("RPC_URL", "0")
 CHAIN_ID = 8453
 
 # --- Wallet Configuration ---
-
 DUMMY_PRIVATE_KEY = os.getenv("PRIVATE_KEY", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 # --- Pool Configuration ---
-
 POOL_ADDRESS = "0x0206B696a410277eF692024C2B64CcF4EaC78589"
 NONFUNGIBLE_POSITION_MANAGER_ADDRESS = "0x827922686190790b37229fd06084350E74485b72"
 ROUTER_ADDRESS = "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5"

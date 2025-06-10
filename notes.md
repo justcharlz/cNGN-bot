@@ -24,7 +24,7 @@ TODO:
     - Backtesting module which provides liquidity right after pool creation, simulates historical swaps, and tracks fees and LVR
 
 HOW TO RUN TESTS:
-1. Run "anvil --fork-url ..." and replace "..." with a Base mainnet RPC URL
+1. Run "anvil --fork-url ..." and replace "..." with a Base mainnet RPC URL. Make sure to place this URL in a .env file as well so that it can get set in bot/config.py
 2. Open a new terminal window and go to cNGN directory
 3. To run all tests: "python3 -m unittest discover -s bot/tests"
     a. To run a specific test, run "python3 -m unittest bot.tests.test_..._anvil"
